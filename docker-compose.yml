@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  gbv-dashboard:
+    build: .
+    container_name: gbv-survey-dashboard
+    ports:
+      - "8501:8501"  # Streamlit frontend
+      - "5000:5000"  # Flask backend
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend/.env:/app/backend/.env:ro
+      - ./database:/app/database
+      - ./logs:/var/log/gbv-dashboard
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - gbv-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: gbv-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - gbv-dashboard
+    restart: unless-stopped
+    networks:
+      - gbv-network
+
+networks:
+  gbv-network:
+    driver: bridge
+
+volumes:
+  logs:
+  database:
