@@ -1114,7 +1114,7 @@ def main():
     # Test connection
     health_data = fetch_json("/api/health")
     if not health_data:
-        st.error("❌ Cannot connect to backend API. Make sure backend is running on http://localhost:5002")
+        st.error("❌ Cannot connect to backend API. Make sure backend is running on http://localhost:5000")
         return
     
     # Professional tab layout
