@@ -24,9 +24,10 @@ from auth_manager import auth_manager, authenticated_request
 def fig_to_image_bytes(fig, format="png", width=800, height=500):
     """Convert a Plotly figure to image bytes."""
     try:
-        return fig.to_image(format=format, width=width, height=height, engine="kaleido")
-    except Exception:
-        # Fallback if kaleido not available
+        # Don't use deprecated engine parameter - kaleido is default
+        return fig.to_image(format=format, width=width, height=height, scale=2)
+    except Exception as e:
+        print(f"Image conversion error: {e}")
         return None
 
 
@@ -36,96 +37,118 @@ def generate_chart_pdf(charts_data: List[Dict], title: str = "GBV ICT Readiness 
     charts_data: List of dicts with 'fig', 'title', 'summary' keys
     """
     try:
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.lib.units import inch
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib import colors
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-    except ImportError:
+        from reportlab.lib.pagesizes import A4, landscape  # pyright: ignore[reportMissingModuleSource]
+        from reportlab.lib.units import inch  # pyright: ignore[reportMissingModuleSource]
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak  # pyright: ignore[reportMissingModuleSource]
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # pyright: ignore[reportMissingModuleSource]
+        from reportlab.lib import colors  # pyright: ignore[reportMissingModuleSource]
+        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY  # pyright: ignore[reportMissingModuleSource]
+    except ImportError as e:
+        print(f"PDF Import Error: {e}")
         return None
     
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
-                           rightMargin=0.5*inch, leftMargin=0.5*inch,
-                           topMargin=0.5*inch, bottomMargin=0.5*inch)
-    
-    styles = getSampleStyleSheet()
-    
-    # Custom styles
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        spaceAfter=30,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor('#1e4a8a')
-    )
-    
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading2'],
-        fontSize=16,
-        spaceBefore=20,
-        spaceAfter=10,
-        textColor=colors.HexColor('#1e4a8a')
-    )
-    
-    summary_style = ParagraphStyle(
-        'Summary',
-        parent=styles['Normal'],
-        fontSize=11,
-        spaceBefore=10,
-        spaceAfter=15,
-        alignment=TA_JUSTIFY,
-        leading=14
-    )
-    
-    elements = []
-    
-    # Title page
-    elements.append(Spacer(1, 1*inch))
-    elements.append(Paragraph(title, title_style))
-    elements.append(Spacer(1, 0.3*inch))
-    elements.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 
-                             ParagraphStyle('Date', parent=styles['Normal'], alignment=TA_CENTER)))
-    elements.append(Spacer(1, 0.5*inch))
-    elements.append(Paragraph("Namibia Statistics Agency - GBV ICT Readiness Assessment", 
-                             ParagraphStyle('Subtitle', parent=styles['Normal'], alignment=TA_CENTER, fontSize=14)))
-    elements.append(PageBreak())
-    
-    # Charts and summaries
-    for idx, chart_info in enumerate(charts_data):
-        # Chart title
-        elements.append(Paragraph(chart_info.get('title', f'Chart {idx+1}'), heading_style))
+    try:
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
+                               rightMargin=0.5*inch, leftMargin=0.5*inch,
+                               topMargin=0.5*inch, bottomMargin=0.5*inch)
         
-        # Try to render chart as image
-        fig = chart_info.get('fig')
-        if fig:
-            try:
-                img_bytes = fig_to_image_bytes(fig, width=900, height=400)
-                if img_bytes:
-                    img_buffer = io.BytesIO(img_bytes)
-                    img = Image(img_buffer, width=9*inch, height=4*inch)
-                    elements.append(img)
-            except Exception:
-                elements.append(Paragraph("[Chart could not be rendered]", styles['Normal']))
+        styles = getSampleStyleSheet()
         
-        # Summary text
-        summary = chart_info.get('summary', '')
-        if summary:
-            elements.append(Spacer(1, 0.2*inch))
-            elements.append(Paragraph(f"<b>Analysis:</b> {summary}", summary_style))
+        # Custom styles
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            spaceAfter=30,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#1e4a8a')
+        )
         
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=16,
+            spaceBefore=20,
+            spaceAfter=10,
+            textColor=colors.HexColor('#1e4a8a')
+        )
+        
+        summary_style = ParagraphStyle(
+            'Summary',
+            parent=styles['Normal'],
+            fontSize=10,
+            spaceBefore=10,
+            spaceAfter=15,
+            alignment=TA_JUSTIFY,
+            leading=14
+        )
+        
+        elements = []
+        
+        # Title page
+        elements.append(Spacer(1, 1*inch))
+        elements.append(Paragraph(title, title_style))
         elements.append(Spacer(1, 0.3*inch))
+        elements.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 
+                                 ParagraphStyle('Date', parent=styles['Normal'], alignment=TA_CENTER)))
+        elements.append(Spacer(1, 0.5*inch))
+        elements.append(Paragraph("Namibia Statistics Agency - GBV ICT Readiness Assessment", 
+                                 ParagraphStyle('Subtitle', parent=styles['Normal'], alignment=TA_CENTER, fontSize=14)))
+        elements.append(PageBreak())
         
-        # Add page break every 2 charts
-        if (idx + 1) % 2 == 0 and idx < len(charts_data) - 1:
-            elements.append(PageBreak())
-    
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer.getvalue()
+        # Charts and summaries
+        for idx, chart_info in enumerate(charts_data):
+            # Chart title - sanitize text
+            chart_title = str(chart_info.get('title', f'Chart {idx+1}')).replace('•', '-').replace('\n', ' ')
+            elements.append(Paragraph(chart_title, heading_style))
+            
+            # Try to render chart as image
+            fig = chart_info.get('fig')
+            if fig:
+                try:
+                    img_bytes = fig_to_image_bytes(fig, width=900, height=400)
+                    if img_bytes:
+                        img_buffer = io.BytesIO(img_bytes)
+                        img = Image(img_buffer, width=9*inch, height=4*inch)
+                        elements.append(img)
+                except Exception as img_err:
+                    print(f"Chart image error: {img_err}")
+                    elements.append(Paragraph("[Chart could not be rendered]", styles['Normal']))
+            
+            # Summary text - sanitize special characters
+            summary = chart_info.get('summary', '')
+            if summary:
+                # Replace special characters that reportlab can't handle
+                clean_summary = str(summary).replace('•', '-').replace('–', '-').replace('—', '-')
+                clean_summary = clean_summary.replace('"', '"').replace('"', '"')
+                clean_summary = clean_summary.replace(''', "'").replace(''', "'")
+                # Convert newlines to HTML breaks for proper formatting
+                clean_summary = clean_summary.replace('\n\n', '<br/><br/>').replace('\n', '<br/>')
+                
+                elements.append(Spacer(1, 0.2*inch))
+                try:
+                    elements.append(Paragraph(f"<b>Analysis:</b><br/>{clean_summary}", summary_style))
+                except Exception as para_err:
+                    print(f"Paragraph error: {para_err}")
+                    # Fallback to basic text
+                    simple_summary = summary.replace('\n', ' ').replace('•', '-')[:500]
+                    elements.append(Paragraph(f"Analysis: {simple_summary}", styles['Normal']))
+            
+            elements.append(Spacer(1, 0.3*inch))
+            
+            # Add page break after each chart for better layout
+            if idx < len(charts_data) - 1:
+                elements.append(PageBreak())
+        
+        doc.build(elements)
+        buffer.seek(0)
+        return buffer.getvalue()
+    except Exception as e:
+        print(f"PDF Generation Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def generate_summary_text(chart_type: str, data: Dict) -> str:
@@ -1687,39 +1710,135 @@ GBV ICT Readiness Assessment Dashboard
         )
     
     with pdf_col2:
-        # Create charts summary for PDF
+        # Create comprehensive PDF with charts and summaries
         charts_for_pdf = []
         
-        # Add regional stacked bar chart if available
+        # 1. Regional Response Distribution Chart
         if len(regional_summary_df) > 0:
             reg_stack_fig_export = go.Figure()
             reg_stack_fig_export.add_trace(go.Bar(name='Yes', x=regional_summary_df['Region'], y=regional_summary_df['Yes'], marker_color='#22c55e'))
             reg_stack_fig_export.add_trace(go.Bar(name='No', x=regional_summary_df['Region'], y=regional_summary_df['No'], marker_color='#ef4444'))
             reg_stack_fig_export.add_trace(go.Bar(name='Unknown', x=regional_summary_df['Region'], y=regional_summary_df['Unknown'], marker_color='#94a3b8'))
-            reg_stack_fig_export.update_layout(barmode='stack', title="Total Responses by Region", height=400, paper_bgcolor='white', plot_bgcolor='white')
+            reg_stack_fig_export.update_layout(
+                barmode='stack', 
+                title=dict(text="Total Responses by Region", font=dict(size=18, color='#1e4a8a')),
+                height=450, 
+                paper_bgcolor='white', 
+                plot_bgcolor='#f8f9fa',
+                xaxis=dict(title=dict(text="Region", font=dict(size=12, color='black')), tickangle=45, tickfont=dict(size=10, color='black'), showgrid=True, gridcolor='#e0e0e0'),
+                yaxis=dict(title=dict(text="Number of Responses", font=dict(size=12, color='black')), tickfont=dict(size=10, color='black'), showgrid=True, gridcolor='#e0e0e0'),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
+                margin=dict(l=60, r=40, t=80, b=100)
+            )
+            
+            # Find best and worst performing regions
+            regional_summary_df['Yes_Pct'] = regional_summary_df.apply(
+                lambda r: (r['Yes'] / (r['Yes'] + r['No'] + r['Unknown']) * 100) if (r['Yes'] + r['No'] + r['Unknown']) > 0 else 0, axis=1
+            )
+            best_region = regional_summary_df.loc[regional_summary_df['Yes_Pct'].idxmax()] if len(regional_summary_df) > 0 else None
+            worst_region = regional_summary_df.loc[regional_summary_df['Yes_Pct'].idxmin()] if len(regional_summary_df) > 0 else None
+            
+            best_info = f"{best_region['Region']} ({best_region['Yes_Pct']:.1f}% positive)" if best_region is not None else "N/A"
+            worst_info = f"{worst_region['Region']} ({worst_region['Yes_Pct']:.1f}% positive)" if worst_region is not None else "N/A"
+            yes_pct = (total_yes/total_responses*100) if total_responses > 0 else 0
+            no_pct = (total_no/total_responses*100) if total_responses > 0 else 0
+            unk_pct = (total_unknown/total_responses*100) if total_responses > 0 else 0
             
             charts_for_pdf.append({
                 'fig': reg_stack_fig_export,
-                'title': 'Regional Response Distribution',
-                'summary': generate_summary_text('regional_responses', {
-                    'num_regions': len(regional_data),
-                    'total_responses': total_responses,
-                    'total_yes': total_yes,
-                    'total_no': total_no,
-                    'total_unknown': total_unknown,
-                    'yes_pct': (total_yes/total_responses*100) if total_responses > 0 else 0,
-                    'no_pct': (total_no/total_responses*100) if total_responses > 0 else 0,
-                    'unknown_pct': (total_unknown/total_responses*100) if total_responses > 0 else 0
-                })
+                'title': '1. Regional Response Distribution',
+                'summary': f"""This chart shows the distribution of Yes, No, and Unknown responses across all {len(regional_data)} assessed regions in Namibia.
+
+KEY FINDINGS:
+- Total Responses Analyzed: {total_responses:,}
+- Positive Responses (Yes): {total_yes:,} ({yes_pct:.1f}%)
+- Negative Responses (No): {total_no:,} ({no_pct:.1f}%)
+- Unknown/Other: {total_unknown:,} ({unk_pct:.1f}%)
+
+REGIONAL PERFORMANCE:
+- Best Performing: {best_info}
+- Needs Improvement: {worst_info}
+
+INTERPRETATION:
+The stacked bars represent the total indicator responses per region. Green indicates positive ICT readiness, red indicates gaps, and gray represents data that needs verification."""
+            })
+            
+            # 2. Institutions per Region Chart
+            inst_fig = go.Figure(data=[
+                go.Bar(x=regional_summary_df['Region'], y=regional_summary_df['Institutions'], marker_color='#3b82f6',
+                       text=regional_summary_df['Institutions'], textposition='outside', textfont=dict(size=10, color='black'))
+            ])
+            inst_fig.update_layout(
+                title=dict(text="Institutions Assessed per Region", font=dict(size=18, color='#1e4a8a')),
+                height=450, 
+                paper_bgcolor='white', 
+                plot_bgcolor='#f8f9fa',
+                xaxis=dict(title=dict(text="Region", font=dict(size=12, color='black')), tickangle=45, tickfont=dict(size=10, color='black'), showgrid=True, gridcolor='#e0e0e0'),
+                yaxis=dict(title=dict(text="Number of Institutions", font=dict(size=12, color='black')), tickfont=dict(size=10, color='black'), showgrid=True, gridcolor='#e0e0e0'),
+                margin=dict(l=60, r=40, t=80, b=100)
+            )
+            
+            avg_inst = len(institutions)/len(regional_data) if len(regional_data) > 0 else 0
+            region_list = "\n".join([f"- {row['Region']}: {row['Institutions']} institutions" for _, row in regional_summary_df.iterrows()])
+            
+            charts_for_pdf.append({
+                'fig': inst_fig,
+                'title': '2. Institutions Assessed per Region',
+                'summary': f"""This chart displays the number of institutions that completed the GBV ICT Readiness assessment in each region.
+
+KEY STATISTICS:
+- Total Institutions Assessed: {len(institutions)}
+- Number of Regions Covered: {len(regional_data)}
+- Average Institutions per Region: {avg_inst:.1f}
+
+DISTRIBUTION ANALYSIS:
+{region_list}
+
+INTERPRETATION:
+This distribution helps identify which regions have greater institutional coverage and where additional assessment efforts may be needed."""
+            })
+            
+            # 3. Regional Positive Response Rate Chart
+            rate_fig = go.Figure(data=[
+                go.Bar(x=regional_summary_df['Region'], y=regional_summary_df['Yes_Pct'], marker_color='#10b981',
+                       text=[f"{v:.1f}%" for v in regional_summary_df['Yes_Pct']], textposition='outside', textfont=dict(size=9, color='black'))
+            ])
+            rate_fig.update_layout(
+                title=dict(text="Positive Response Rate by Region (%)", font=dict(size=18, color='#1e4a8a')),
+                height=450, 
+                paper_bgcolor='white', 
+                plot_bgcolor='#f8f9fa',
+                xaxis=dict(title=dict(text="Region", font=dict(size=12, color='black')), tickangle=45, tickfont=dict(size=10, color='black'), showgrid=True, gridcolor='#e0e0e0'),
+                yaxis=dict(title=dict(text="Positive Rate (%)", font=dict(size=12, color='black')), tickfont=dict(size=10, color='black'), showgrid=True, gridcolor='#e0e0e0', range=[0, 100]),
+                margin=dict(l=60, r=40, t=80, b=100)
+            )
+            
+            readiness_list = "\n".join([f"- {row['Region']}: {row['Yes_Pct']:.1f}% readiness" for _, row in regional_summary_df.sort_values('Yes_Pct', ascending=False).iterrows()])
+            
+            charts_for_pdf.append({
+                'fig': rate_fig,
+                'title': '3. Regional ICT Readiness Rates',
+                'summary': f"""This chart compares the positive response rates (percentage of Yes answers) across all assessed regions.
+
+READINESS LEVELS:
+{readiness_list}
+
+INTERPRETATION:
+- Regions above 60%: Strong ICT readiness for GBV response
+- Regions 40-60%: Moderate readiness, some improvements needed
+- Regions below 40%: Priority areas requiring capacity building
+
+RECOMMENDATIONS:
+Lower-performing regions should receive targeted support in areas such as infrastructure, training, and policy implementation."""
             })
         
         # Try to generate PDF
-        pdf_bytes = generate_chart_pdf(charts_for_pdf, "GBV ICT Readiness Report")
+        pdf_bytes = generate_chart_pdf(charts_for_pdf, "GBV ICT Readiness Assessment Report - Namibia")
         if pdf_bytes:
             st.download_button(
-                label="📄 Download Charts Report (PDF)",
+                label="📄 Download Full Report (PDF)",
                 data=pdf_bytes,
-                file_name=f"gbv_charts_report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                file_name=f"gbv_full_report_{datetime.now().strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
                 key="charts_pdf",
                 use_container_width=True
@@ -2029,10 +2148,18 @@ def show_submissions_summary():
                             st.download_button("Download Consolidated Workbook", data=long_bytes, file_name="long_indicators_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     if st.button("📄 Generate Consolidated PDF (All Regions)"):
                         try:
-                            from .reporting import generate_consolidated_pdf
                             with st.spinner("Rendering consolidated PDF..."):
-                                pdf_bytes = generate_consolidated_pdf(subs_for_export)
-                                st.download_button("Download Consolidated PDF", data=pdf_bytes, file_name="consolidated_report.pdf", mime="application/pdf")
+                                # Generate PDF using the built-in function
+                                charts_data = [{
+                                    'fig': None,
+                                    'title': 'Consolidated Report',
+                                    'summary': f'Report covers {len(subs_for_export)} submissions.'
+                                }]
+                                pdf_bytes = generate_chart_pdf(charts_data, "Consolidated GBV Report")
+                                if pdf_bytes:
+                                    st.download_button("Download Consolidated PDF", data=pdf_bytes, file_name="consolidated_report.pdf", mime="application/pdf")
+                                else:
+                                    st.info("PDF generation requires 'reportlab' package")
                         except Exception as e:
                             st.error(f"Unable to generate PDF: {e}")
 
@@ -2247,9 +2374,10 @@ def _fig_to_png_bytes(fig) -> bytes:
 
 
 def _generate_region_report(region_name: str, submissions: List[Dict[str, Any]]) -> bytes:
-    """Generate a PDF for a single region by filtering submissions and delegating to reporting.generate_consolidated_pdf."""
+    """Generate a PDF for a single region."""
     if not region_name:
         return b''
+    
     def _map_region_val(rv):
         if not rv: return None
         rl = rv.lower()
@@ -2264,18 +2392,78 @@ def _generate_region_report(region_name: str, submissions: List[Dict[str, Any]])
         if "omaheke" in rl:
             return "omaheke"
         return rl
+    
     subs_for_region = [s for s in submissions if _map_region_val(s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region')) == (region_name or '').lower()]
+    
     try:
-        from .reporting import generate_consolidated_pdf
-        return generate_consolidated_pdf(subs_for_region)
+        charts_data = [{
+            'fig': None,
+            'title': f'{region_name} Region Report',
+            'summary': f'This report covers {len(subs_for_region)} institutions in the {region_name} region.'
+        }]
+        pdf_bytes = generate_chart_pdf(charts_data, f"GBV Report - {region_name} Region")
+        return pdf_bytes if pdf_bytes else b''
     except Exception:
         return b''
 
 
 def build_indicators_excel(submissions: List[Dict[str, Any]], include_sanitized: bool = False, include_long: bool = False) -> bytes:
-    """Wrapper that delegates to the centralized implementation in reporting.py."""
-    from .reporting import build_indicators_excel as _build
-    return _build(submissions, include_sanitized=include_sanitized, include_long=include_long)
+    """Build an Excel workbook with indicator data from submissions."""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Sheet 1: Summary by indicator
+        if submissions:
+            # Get all unique keys from submissions
+            all_keys = set()
+            for s in submissions:
+                all_keys.update(s.keys())
+            
+            # Filter to indicator keys (exclude metadata)
+            indicator_keys = [k for k in sorted(all_keys) if not k.startswith('_') and not k.startswith('meta')]
+            
+            # Build summary data
+            summary_rows = []
+            for key in indicator_keys[:50]:  # Limit to first 50 indicators
+                values = [s.get(key, '') for s in submissions]
+                non_empty = [v for v in values if v]
+                yes_count = sum(1 for v in non_empty if str(v).lower().strip() in ['yes', 'y', 'true', '1'])
+                no_count = sum(1 for v in non_empty if str(v).lower().strip() in ['no', 'n', 'false', '0'])
+                
+                summary_rows.append({
+                    'Indicator': key,
+                    'Total Responses': len(non_empty),
+                    'Yes': yes_count,
+                    'No': no_count,
+                    'Other': len(non_empty) - yes_count - no_count,
+                    'Yes %': round(yes_count / len(non_empty) * 100, 1) if non_empty else 0
+                })
+            
+            pd.DataFrame(summary_rows).to_excel(writer, sheet_name='Indicator Summary', index=False)
+        
+        # Sheet 2: Raw data (sanitized if requested)
+        if include_sanitized and submissions:
+            sanitized = _sanitize_submissions_for_export(submissions)
+            if sanitized:
+                df = pd.DataFrame(sanitized)
+                # Limit columns
+                cols = [c for c in df.columns if not c.startswith('_')][:30]
+                df[cols].to_excel(writer, sheet_name='Submissions', index=False)
+        
+        # Sheet 3: Regional breakdown
+        if submissions:
+            regional_counts = {}
+            for s in submissions:
+                region = s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region') or 'Unknown'
+                regional_counts[region] = regional_counts.get(region, 0) + 1
+            
+            regional_df = pd.DataFrame([
+                {'Region': k, 'Count': v} for k, v in sorted(regional_counts.items())
+            ])
+            regional_df.to_excel(writer, sheet_name='By Region', index=False)
+    
+    output.seek(0)
+    return output.getvalue()
 
 
 def show_raw_submissions():
