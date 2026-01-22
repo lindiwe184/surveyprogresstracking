@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 from datetime import datetime, timedelta
 from typing import Dict, List, Any
 from functools import lru_cache
@@ -14,6 +15,264 @@ import numpy as np
 
 from config import get_api_base_url
 from auth_manager import auth_manager, authenticated_request
+
+
+# =============================================
+# PDF & CHART EXPORT UTILITIES
+# =============================================
+
+def fig_to_image_bytes(fig, format="png", width=800, height=500):
+    """Convert a Plotly figure to image bytes."""
+    try:
+        return fig.to_image(format=format, width=width, height=height, engine="kaleido")
+    except Exception:
+        # Fallback if kaleido not available
+        return None
+
+
+def generate_chart_pdf(charts_data: List[Dict], title: str = "GBV ICT Readiness Report"):
+    """
+    Generate a PDF report with charts and summaries.
+    charts_data: List of dicts with 'fig', 'title', 'summary' keys
+    """
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+    except ImportError:
+        return None
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
+                           rightMargin=0.5*inch, leftMargin=0.5*inch,
+                           topMargin=0.5*inch, bottomMargin=0.5*inch)
+    
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        spaceAfter=30,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor('#1e4a8a')
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        spaceBefore=20,
+        spaceAfter=10,
+        textColor=colors.HexColor('#1e4a8a')
+    )
+    
+    summary_style = ParagraphStyle(
+        'Summary',
+        parent=styles['Normal'],
+        fontSize=11,
+        spaceBefore=10,
+        spaceAfter=15,
+        alignment=TA_JUSTIFY,
+        leading=14
+    )
+    
+    elements = []
+    
+    # Title page
+    elements.append(Spacer(1, 1*inch))
+    elements.append(Paragraph(title, title_style))
+    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 
+                             ParagraphStyle('Date', parent=styles['Normal'], alignment=TA_CENTER)))
+    elements.append(Spacer(1, 0.5*inch))
+    elements.append(Paragraph("Namibia Statistics Agency - GBV ICT Readiness Assessment", 
+                             ParagraphStyle('Subtitle', parent=styles['Normal'], alignment=TA_CENTER, fontSize=14)))
+    elements.append(PageBreak())
+    
+    # Charts and summaries
+    for idx, chart_info in enumerate(charts_data):
+        # Chart title
+        elements.append(Paragraph(chart_info.get('title', f'Chart {idx+1}'), heading_style))
+        
+        # Try to render chart as image
+        fig = chart_info.get('fig')
+        if fig:
+            try:
+                img_bytes = fig_to_image_bytes(fig, width=900, height=400)
+                if img_bytes:
+                    img_buffer = io.BytesIO(img_bytes)
+                    img = Image(img_buffer, width=9*inch, height=4*inch)
+                    elements.append(img)
+            except Exception:
+                elements.append(Paragraph("[Chart could not be rendered]", styles['Normal']))
+        
+        # Summary text
+        summary = chart_info.get('summary', '')
+        if summary:
+            elements.append(Spacer(1, 0.2*inch))
+            elements.append(Paragraph(f"<b>Analysis:</b> {summary}", summary_style))
+        
+        elements.append(Spacer(1, 0.3*inch))
+        
+        # Add page break every 2 charts
+        if (idx + 1) % 2 == 0 and idx < len(charts_data) - 1:
+            elements.append(PageBreak())
+    
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def generate_summary_text(chart_type: str, data: Dict) -> str:
+    """Generate a written summary for different chart types."""
+    
+    summaries = {
+        "completion_gauge": lambda d: f"""The survey has achieved {d.get('completion', 0):.1f}% completion against the target of {d.get('target', 90)} surveys. 
+        Currently {d.get('completed', 0)} institutions have completed their assessments. 
+        {'The survey is ahead of schedule.' if d.get('ahead', False) else 'Additional effort may be needed to meet the target.'}
+        With {d.get('days_remaining', 0)} days remaining, an average of {d.get('daily_needed', 0):.1f} surveys per day would be required to reach the goal.""",
+        
+        "regional_comparison": lambda d: f"""Regional analysis shows varying levels of survey completion across {d.get('num_regions', 0)} regions. 
+        {d.get('top_region', 'Unknown')} leads with {d.get('top_count', 0)} completed surveys ({d.get('top_pct', 0):.1f}% of their target), 
+        while {d.get('lowest_region', 'Unknown')} has {d.get('lowest_count', 0)} completions. 
+        The overall regional completion rate averages {d.get('avg_rate', 0):.1f}%.""",
+        
+        "indicator_distribution": lambda d: f"""Analysis of {d.get('category', 'indicators')} shows that {d.get('yes_pct', 0):.1f}% of institutions responded 'Yes', 
+        {d.get('no_pct', 0):.1f}% responded 'No', and {d.get('unknown_pct', 0):.1f}% had unknown or other responses. 
+        The strongest indicator is '{d.get('strongest', 'N/A')}' with {d.get('strongest_pct', 0):.1f}% positive responses, 
+        while '{d.get('weakest', 'N/A')}' shows the most room for improvement at {d.get('weakest_pct', 0):.1f}%.""",
+        
+        "regional_responses": lambda d: f"""Across all {d.get('num_regions', 0)} regions, a total of {d.get('total_responses', 0)} indicator responses were recorded. 
+        Of these, {d.get('total_yes', 0)} ({d.get('yes_pct', 0):.1f}%) were positive ('Yes'), 
+        {d.get('total_no', 0)} ({d.get('no_pct', 0):.1f}%) were negative ('No'), 
+        and {d.get('total_unknown', 0)} ({d.get('unknown_pct', 0):.1f}%) were unknown or other. 
+        This indicates {'strong' if d.get('yes_pct', 0) > 60 else 'moderate' if d.get('yes_pct', 0) > 40 else 'limited'} ICT readiness across the assessed institutions.""",
+        
+        "daily_progress": lambda d: f"""The daily submission trend shows {d.get('total_days', 0)} days of data collection with an average of {d.get('avg_daily', 0):.1f} submissions per day. 
+        The peak day recorded {d.get('peak_count', 0)} submissions on {d.get('peak_date', 'N/A')}. 
+        Cumulative progress reached {d.get('cumulative', 0)} total submissions. 
+        {'The trend is positive with increasing daily submissions.' if d.get('trend_up', False) else 'The submission rate has been steady.'}""",
+        
+        "heatmap": lambda d: f"""The regional heatmap visualization reveals varying levels of ICT readiness across indicator categories. 
+        {d.get('best_region', 'Unknown')} shows the highest overall readiness scores, 
+        particularly strong in {d.get('best_category', 'N/A')}. 
+        Areas requiring attention include {d.get('weak_areas', 'several categories')} across multiple regions. 
+        The data suggests targeted interventions should focus on {d.get('priority_focus', 'improving baseline infrastructure')}."""
+    }
+    
+    generator = summaries.get(chart_type, lambda d: "Analysis of the data presented in this chart.")
+    try:
+        return generator(data)
+    except Exception:
+        return "Analysis of the data presented in this chart."
+
+
+def create_download_section(fig, chart_title: str, summary_data: Dict, chart_type: str, key_prefix: str):
+    """Create a download section with PDF and summary export options."""
+    
+    summary_text = generate_summary_text(chart_type, summary_data)
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col1:
+        # Download chart as PNG
+        try:
+            img_bytes = fig_to_image_bytes(fig, format="png", width=1200, height=600)
+            if img_bytes:
+                st.download_button(
+                    label="📷 Download Chart (PNG)",
+                    data=img_bytes,
+                    file_name=f"{chart_title.replace(' ', '_').lower()}.png",
+                    mime="image/png",
+                    key=f"png_{key_prefix}",
+                    use_container_width=True
+                )
+        except Exception:
+            pass
+    
+    with col2:
+        # Download summary as text
+        full_summary = f"""
+{chart_title}
+{'='*len(chart_title)}
+
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+SUMMARY
+-------
+{summary_text}
+
+---
+Report generated by Namibia Statistics Agency - GBV ICT Readiness Assessment Dashboard
+        """
+        st.download_button(
+            label="📝 Download Summary (TXT)",
+            data=full_summary,
+            file_name=f"{chart_title.replace(' ', '_').lower()}_summary.txt",
+            mime="text/plain",
+            key=f"txt_{key_prefix}",
+            use_container_width=True
+        )
+    
+    with col3:
+        # Show/hide summary in expander
+        with st.expander("📊 View Analysis", expanded=False):
+            st.markdown(f"**{chart_title}**")
+            st.markdown(summary_text)
+
+
+def create_full_report_download(all_charts: List[Dict]):
+    """Create a complete PDF report with all charts."""
+    st.markdown("---")
+    st.markdown("### 📥 Export Complete Report")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Generate full PDF
+        pdf_bytes = generate_chart_pdf(all_charts, "GBV ICT Readiness Assessment Report")
+        if pdf_bytes:
+            st.download_button(
+                label="📄 Download Full Report (PDF)",
+                data=pdf_bytes,
+                file_name=f"gbv_readiness_report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                key="full_pdf_report",
+                use_container_width=True
+            )
+        else:
+            st.info("PDF generation requires 'reportlab' package. Install with: pip install reportlab")
+    
+    with col2:
+        # Generate all summaries as text
+        all_summaries = f"""
+GBV ICT READINESS ASSESSMENT - COMPLETE ANALYSIS
+{'='*50}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+Namibia Statistics Agency
+
+"""
+        for chart in all_charts:
+            all_summaries += f"""
+{chart.get('title', 'Chart')}
+{'-'*len(chart.get('title', 'Chart'))}
+{chart.get('summary', 'No summary available.')}
+
+"""
+        
+        st.download_button(
+            label="📋 Download All Summaries (TXT)",
+            data=all_summaries,
+            file_name=f"gbv_readiness_summaries_{datetime.now().strftime('%Y%m%d')}.txt",
+            mime="text/plain",
+            key="full_summaries",
+            use_container_width=True
+        )
 
 
 API_BASE_URL = get_api_base_url().rstrip("/")
@@ -305,7 +564,7 @@ def show_national_overview():
             }
         }
     ))
-    fig.update_layout(height=400, plot_bgcolor='white', paper_bgcolor='white', font=dict(color='black'))
+    fig.update_layout(height=320, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#1a1a1a'))
     st.plotly_chart(fig, use_container_width=True)
     
     # Professional refresh section
@@ -469,10 +728,10 @@ def show_regional_breakdown():
             title="Completion Rate (%)"
         )
         fig.update_layout(
-            height=400,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color='black')
+            height=320,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a')
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
@@ -732,17 +991,7 @@ def show_reports_page():
     
     st.info(f"**📊 Total Assessments: {len(submissions)} institutions**")
     
-    # ==========================================
-    # SECTION 1: INSTITUTIONAL LEVEL DATA
-    # ==========================================
-    st.markdown("""
-    <div class="section-divider" style="background: linear-gradient(135deg, #1e4a8a 0%, #2563eb 100%); border-left: 4px solid #1e3a5f;">
-        <h3 style="color: white;">🏛️ Institutional Level Data</h3>
-        <p style="color: rgba(255,255,255,0.8);">View indicator responses for each institution</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Build institution list
+    # Build institution list for use in other sections
     institutions = []
     for sub in submissions:
         inst_name = get_institution(sub)
@@ -756,174 +1005,17 @@ def show_reports_page():
     # Sort by region then institution
     institutions.sort(key=lambda x: (x["region"], x["name"]))
     
-    # Institution selector
-    institution_names = [f"{inst['name']} ({inst['region']})" for inst in institutions]
+    # Region filter for all sections
+    regions = sorted(list(set(inst["region"] for inst in institutions if inst["region"] != "Unknown")))
+    region_filter = st.selectbox("🗺️ Filter by Region", ["All Regions"] + regions, key="region_filter")
     
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        selected_institution = st.selectbox(
-            "Select Institution to View",
-            options=range(len(institutions)),
-            format_func=lambda x: institution_names[x],
-            key="inst_selector"
-        )
-    
-    with col2:
-        # Filter by region
-        regions = sorted(list(set(inst["region"] for inst in institutions if inst["region"] != "Unknown")))
-        region_filter = st.selectbox("Filter by Region", ["All Regions"] + regions, key="region_filter")
-    
-    # Display selected institution's data
-    if selected_institution is not None:
-        inst = institutions[selected_institution]
-        
-        st.markdown(f"""
-        <div style="background: #f8fafc; padding: 1rem; border-radius: 8px; margin: 1rem 0; border-left: 4px solid #1e4a8a;">
-            <h3 style="margin: 0; color: #1e4a8a;">{inst['name']}</h3>
-            <p style="margin: 0.5rem 0 0 0; color: #64748b;">Region: <strong>{inst['region']}</strong></p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Calculate overall response summary for this institution
-        all_yes = 0
-        all_no = 0
-        all_other = 0
-        for category, cat_data in GBV_INDICATORS.items():
-            for key in cat_data["indicators"].keys():
-                value = str(inst["data"].get(key, "")).strip().lower()
-                if value in ["yes", "y", "true", "1"]:
-                    all_yes += 1
-                elif value in ["no", "n", "false", "0"]:
-                    all_no += 1
-                elif value:
-                    all_other += 1
-        
-        # Institution summary charts
-        st.subheader("📊 Response Summary")
-        
-        chart_col1, chart_col2 = st.columns(2)
-        
-        with chart_col1:
-            # Pie chart of overall responses
-            if all_yes + all_no + all_other > 0:
-                pie_fig = go.Figure(data=[go.Pie(
-                    labels=['Yes', 'No', 'Unknown/Other'],
-                    values=[all_yes, all_no, all_other],
-                    hole=.4,
-                    marker_colors=['#22c55e', '#ef4444', '#94a3b8']
-                )])
-                pie_fig.update_layout(
-                    title="Overall Response Distribution",
-                    height=350,
-                    paper_bgcolor='white',
-                    plot_bgcolor='white',
-                    font=dict(color='black')
-                )
-                st.plotly_chart(pie_fig, use_container_width=True, key=f"pie_{selected_institution}")
-            else:
-                st.info("No response data available")
-        
-        with chart_col2:
-            # Category breakdown bar chart
-            category_summary = []
-            for cat_name, cat_data in GBV_INDICATORS.items():
-                cat_yes = 0
-                cat_no = 0
-                cat_other = 0
-                for key in cat_data["indicators"].keys():
-                    value = str(inst["data"].get(key, "")).strip().lower()
-                    if value in ["yes", "y", "true", "1"]:
-                        cat_yes += 1
-                    elif value in ["no", "n", "false", "0"]:
-                        cat_no += 1
-                    elif value:
-                        cat_other += 1
-                category_summary.append({
-                    "Category": cat_name.split(" & ")[0][:15],
-                    "Yes": cat_yes,
-                    "No": cat_no,
-                    "Other": cat_other
-                })
-            
-            cat_df = pd.DataFrame(category_summary)
-            bar_fig = go.Figure()
-            bar_fig.add_trace(go.Bar(name='Yes', x=cat_df['Category'], y=cat_df['Yes'], marker_color='#22c55e'))
-            bar_fig.add_trace(go.Bar(name='No', x=cat_df['Category'], y=cat_df['No'], marker_color='#ef4444'))
-            bar_fig.add_trace(go.Bar(name='Other', x=cat_df['Category'], y=cat_df['Other'], marker_color='#94a3b8'))
-            bar_fig.update_layout(
-                barmode='stack',
-                title="Responses by Category",
-                height=350,
-                paper_bgcolor='white',
-                plot_bgcolor='white',
-                font=dict(color='black'),
-                xaxis_tickangle=45
-            )
-            st.plotly_chart(bar_fig, use_container_width=True, key=f"bar_{selected_institution}")
-        
-        # Create tabs for each indicator category
-        category_tabs = st.tabs(list(GBV_INDICATORS.keys()))
-        
-        for idx, (category, cat_data) in enumerate(GBV_INDICATORS.items()):
-            with category_tabs[idx]:
-                st.markdown(f"*{cat_data['description']}*")
-                
-                # Build indicator data for this institution
-                indicator_rows = []
-                response_colors = []
-                for key, label in cat_data["indicators"].items():
-                    value = inst["data"].get(key, "")
-                    val_str = str(value).strip().lower() if value else ""
-                    
-                    if val_str in ["yes", "y", "true", "1"]:
-                        response_colors.append('#22c55e')
-                        numeric_val = 1
-                    elif val_str in ["no", "n", "false", "0"]:
-                        response_colors.append('#ef4444')
-                        numeric_val = 0
-                    else:
-                        response_colors.append('#94a3b8')
-                        numeric_val = 0.5
-                    
-                    indicator_rows.append({
-                        "Indicator": label,
-                        "Response": format_response(value),
-                        "Raw Value": str(value) if value else "—",
-                        "NumericValue": numeric_val
-                    })
-                
-                indicator_df = pd.DataFrame(indicator_rows)
-                
-                # Display table
-                st.dataframe(indicator_df[["Indicator", "Response", "Raw Value"]], use_container_width=True, hide_index=True)
-                
-                # Horizontal bar chart for this category
-                if len(indicator_df) > 0:
-                    ind_fig = go.Figure(go.Bar(
-                        x=indicator_df['NumericValue'],
-                        y=indicator_df['Indicator'],
-                        orientation='h',
-                        marker_color=response_colors,
-                        text=indicator_df['Response'],
-                        textposition='inside'
-                    ))
-                    ind_fig.update_layout(
-                        title=f"{category} - Visual Summary",
-                        height=max(300, len(indicator_df) * 35),
-                        paper_bgcolor='white',
-                        plot_bgcolor='white',
-                        font=dict(color='black'),
-                        xaxis=dict(showticklabels=False, showgrid=False),
-                        yaxis=dict(autorange="reversed"),
-                        margin=dict(l=10, r=10, t=50, b=10)
-                    )
-                    st.plotly_chart(ind_fig, use_container_width=True, key=f"ind_{category}_{selected_institution}")
+    st.markdown("---")
     
     # ==========================================
-    # SECTION 2: INSTITUTIONAL COMPARISON TABLE
+    # SECTION 1: INSTITUTIONAL COMPARISON TABLE
     # ==========================================
     st.markdown("""
-    <div class="section-divider" style="background: linear-gradient(135deg, #059669 0%, #10b981 100%); border-left: 4px solid #047857;">
+    <div class="section-divider" style="background: linear-gradient(135deg, #1e4a8a 0%, #2563eb 100%); border-left: 4px solid #1e3a5f;">
         <h3 style="color: white;">📊 All Institutions - Indicator Comparison</h3>
         <p style="color: rgba(255,255,255,0.8);">Compare responses across all institutions by category</p>
     </div>
@@ -1032,9 +1124,9 @@ def show_reports_page():
                     barmode='stack',
                     title="Response Counts by Indicator",
                     height=max(400, len(stats_df) * 35),
-                    paper_bgcolor='white',
-                    plot_bgcolor='white',
-                    font=dict(color='black'),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#1a1a1a'),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02)
                 )
                 st.plotly_chart(stack_fig, use_container_width=True, key=f"stack_{selected_category}")
@@ -1056,9 +1148,9 @@ def show_reports_page():
                 )
                 pct_fig.update_layout(
                     height=max(400, len(stats_df) * 35),
-                    paper_bgcolor='white',
-                    plot_bgcolor='white',
-                    font=dict(color='black'),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#1a1a1a'),
                     xaxis_title="Yes %",
                     yaxis_title=""
                 )
@@ -1066,10 +1158,10 @@ def show_reports_page():
                 st.plotly_chart(pct_fig, use_container_width=True, key=f"pct_{selected_category}")
     
     # ==========================================
-    # SECTION 3: REGIONAL LEVEL DATA
+    # SECTION 2: REGIONAL LEVEL DATA
     # ==========================================
     st.markdown("""
-    <div class="section-divider" style="background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%); border-left: 4px solid #7c3aed;">
+    <div class="section-divider" style="background: linear-gradient(135deg, #059669 0%, #10b981 100%); border-left: 4px solid #047857;">
         <h3 style="color: white;">🗺️ Regional Level Data</h3>
         <p style="color: rgba(255,255,255,0.8);">Aggregated indicator data by region</p>
     </div>
@@ -1113,9 +1205,9 @@ def show_reports_page():
             )
             fig.update_layout(
                 height=300,
-                plot_bgcolor='white',
-                paper_bgcolor='white',
-                font=dict(color='black'),
+                plot_bgcolor='rgba(0,0,0,0)',
+paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a'),
                 showlegend=False
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -1181,12 +1273,17 @@ def show_reports_page():
             reg_stack_fig.update_layout(
                 barmode='stack',
                 title="Total Responses by Region",
-                height=400,
-                paper_bgcolor='white',
-                plot_bgcolor='white',
-                font=dict(color='black')
+                height=320,
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='#1a1a1a')
             )
-            st.plotly_chart(reg_stack_fig, use_container_width=True, key="regional_stack_chart")
+            st.plotly_chart(
+                reg_stack_fig, 
+                use_container_width=True, 
+                key="regional_stack_chart",
+                config={'displayModeBar': False}
+            )
         
         with reg_col2:
             # Pie chart of overall distribution
@@ -1203,9 +1300,9 @@ def show_reports_page():
                 )])
                 reg_pie_fig.update_layout(
                     title="Overall Response Distribution (All Regions)",
-                    height=400,
-                    paper_bgcolor='white',
-                    font=dict(color='black')
+                    height=320,
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#1a1a1a')
                 )
                 st.plotly_chart(reg_pie_fig, use_container_width=True, key="regional_pie_chart")
         
@@ -1248,10 +1345,10 @@ def show_reports_page():
                 title="'Yes' Responses by Category and Region"
             )
             group_fig.update_layout(
-                height=450,
-                paper_bgcolor='white',
-                plot_bgcolor='white',
-                font=dict(color='black'),
+                height=340,
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='#1a1a1a'),
                 xaxis_tickangle=45
             )
             st.plotly_chart(group_fig, use_container_width=True, key="regional_group_chart")
@@ -1269,9 +1366,9 @@ def show_reports_page():
                 aspect="auto"
             )
             heatmap_fig.update_layout(
-                height=400,
-                paper_bgcolor='white',
-                font=dict(color='black')
+                height=320,
+paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a')
             )
             st.plotly_chart(heatmap_fig, use_container_width=True, key="regional_heatmap")
         except Exception as e:
@@ -1325,8 +1422,8 @@ def show_reports_page():
                 sel_region_pie.update_layout(
                     title=f"{selected_region} - Overall Responses",
                     height=280,
-                    paper_bgcolor='white',
-                    font=dict(color='black'),
+paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a'),
                     margin=dict(l=20, r=20, t=40, b=20)
                 )
                 st.plotly_chart(sel_region_pie, use_container_width=True, key=f"sel_region_pie_{selected_region}")
@@ -1399,20 +1496,20 @@ def show_reports_page():
                         title=f"{selected_region} - {category}",
                         xaxis_title="",
                         yaxis_title="Number of Institutions",
-                        height=400,
-                        plot_bgcolor='white',
-                        paper_bgcolor='white',
-                        font=dict(color='black'),
+                        height=320,
+                        plot_bgcolor='rgba(0,0,0,0)',
+paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a'),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                     )
                     cat_region_fig.update_xaxes(tickangle=45)
                     st.plotly_chart(cat_region_fig, use_container_width=True, key=f"cat_region_{category}_{selected_region}")
     
     # ==========================================
-    # SECTION 4: COMPLETE INDICATOR LIST
+    # SECTION 3: COMPLETE INDICATOR LIST
     # ==========================================
     st.markdown("""
-    <div class="section-divider" style="background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%); border-left: 4px solid #d97706;">
+    <div class="section-divider" style="background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%); border-left: 4px solid #7c3aed;">
         <h3 style="color: white;">📋 Complete Indicator Reference</h3>
         <p style="color: rgba(255,255,255,0.8);">All GBV ICT Readiness indicators by category</p>
     </div>
@@ -1438,11 +1535,13 @@ def show_reports_page():
         st.metric("Regions Covered", len(regional_data))
     
     # ==========================================
-    # SECTION 5: EXPORT DATA
+    # SECTION 4: EXPORT DATA
     # ==========================================
     st.markdown("---")
     st.markdown("### 📥 Export Data")
     
+    # Excel exports row
+    st.markdown("#### 📊 Excel Exports")
     export_col1, export_col2 = st.columns(2)
     
     with export_col1:
@@ -1501,6 +1600,156 @@ def show_reports_page():
                 file_name="gbv_regional_data.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+    
+    # PDF and Summary exports row
+    st.markdown("---")
+    st.markdown("#### 📄 Charts & Analysis Reports")
+    
+    # Calculate summary statistics for PDF report
+    total_yes = sum(regional_summary_df['Yes']) if 'Yes' in regional_summary_df.columns else 0
+    total_no = sum(regional_summary_df['No']) if 'No' in regional_summary_df.columns else 0
+    total_unknown = sum(regional_summary_df['Unknown']) if 'Unknown' in regional_summary_df.columns else 0
+    total_responses = total_yes + total_no + total_unknown
+    
+    # Generate comprehensive summary text
+    comprehensive_summary = f"""
+GBV ICT READINESS ASSESSMENT - COMPREHENSIVE ANALYSIS REPORT
+{'='*60}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+Namibia Statistics Agency
+
+EXECUTIVE SUMMARY
+-----------------
+This report presents the findings from the GBV ICT Readiness Assessment conducted across 
+{len(regional_data)} regions in Namibia, covering {len(institutions)} institutions.
+
+KEY FINDINGS
+------------
+
+1. OVERALL RESPONSE DISTRIBUTION
+   - Total Indicator Responses: {total_responses:,}
+   - Positive Responses (Yes): {total_yes:,} ({(total_yes/total_responses*100) if total_responses > 0 else 0:.1f}%)
+   - Negative Responses (No): {total_no:,} ({(total_no/total_responses*100) if total_responses > 0 else 0:.1f}%)
+   - Unknown/Other: {total_unknown:,} ({(total_unknown/total_responses*100) if total_responses > 0 else 0:.1f}%)
+
+2. REGIONAL COVERAGE
+"""
+    
+    for region, insts in sorted(regional_data.items()):
+        comprehensive_summary += f"   - {region}: {len(insts)} institution(s)\n"
+    
+    comprehensive_summary += f"""
+3. INDICATOR CATEGORIES ASSESSED
+   The assessment covered {len(GBV_INDICATORS)} major indicator categories:
+"""
+    
+    for idx, (cat_name, cat_info) in enumerate(GBV_INDICATORS.items(), 1):
+        comprehensive_summary += f"   {idx}. {cat_name} ({len(cat_info['indicators'])} indicators)\n"
+        comprehensive_summary += f"      {cat_info['description']}\n"
+    
+    comprehensive_summary += f"""
+4. REGIONAL PERFORMANCE ANALYSIS
+"""
+    
+    if len(regional_summary_df) > 0:
+        for _, row in regional_summary_df.iterrows():
+            region_total = row['Yes'] + row['No'] + row['Unknown']
+            yes_pct = (row['Yes'] / region_total * 100) if region_total > 0 else 0
+            comprehensive_summary += f"""
+   {row['Region']}:
+   - Institutions Assessed: {row['Institutions']}
+   - Total Responses: {region_total}
+   - Positive Rate: {yes_pct:.1f}%
+"""
+    
+    comprehensive_summary += f"""
+5. RECOMMENDATIONS
+   Based on the assessment findings:
+   - Regions with lower positive response rates should be prioritized for capacity building
+   - Focus areas include: Policy & Legal Framework, Data Management & Security
+   - Continued monitoring and follow-up assessments recommended
+
+---
+Report generated by Namibia Statistics Agency
+GBV ICT Readiness Assessment Dashboard
+"""
+    
+    pdf_col1, pdf_col2, pdf_col3 = st.columns(3)
+    
+    with pdf_col1:
+        st.download_button(
+            label="📄 Download Full Analysis Report (TXT)",
+            data=comprehensive_summary,
+            file_name=f"gbv_analysis_report_{datetime.now().strftime('%Y%m%d')}.txt",
+            mime="text/plain",
+            key="full_analysis_txt",
+            use_container_width=True
+        )
+    
+    with pdf_col2:
+        # Create charts summary for PDF
+        charts_for_pdf = []
+        
+        # Add regional stacked bar chart if available
+        if len(regional_summary_df) > 0:
+            reg_stack_fig_export = go.Figure()
+            reg_stack_fig_export.add_trace(go.Bar(name='Yes', x=regional_summary_df['Region'], y=regional_summary_df['Yes'], marker_color='#22c55e'))
+            reg_stack_fig_export.add_trace(go.Bar(name='No', x=regional_summary_df['Region'], y=regional_summary_df['No'], marker_color='#ef4444'))
+            reg_stack_fig_export.add_trace(go.Bar(name='Unknown', x=regional_summary_df['Region'], y=regional_summary_df['Unknown'], marker_color='#94a3b8'))
+            reg_stack_fig_export.update_layout(barmode='stack', title="Total Responses by Region", height=400, paper_bgcolor='white', plot_bgcolor='white')
+            
+            charts_for_pdf.append({
+                'fig': reg_stack_fig_export,
+                'title': 'Regional Response Distribution',
+                'summary': generate_summary_text('regional_responses', {
+                    'num_regions': len(regional_data),
+                    'total_responses': total_responses,
+                    'total_yes': total_yes,
+                    'total_no': total_no,
+                    'total_unknown': total_unknown,
+                    'yes_pct': (total_yes/total_responses*100) if total_responses > 0 else 0,
+                    'no_pct': (total_no/total_responses*100) if total_responses > 0 else 0,
+                    'unknown_pct': (total_unknown/total_responses*100) if total_responses > 0 else 0
+                })
+            })
+        
+        # Try to generate PDF
+        pdf_bytes = generate_chart_pdf(charts_for_pdf, "GBV ICT Readiness Report")
+        if pdf_bytes:
+            st.download_button(
+                label="📄 Download Charts Report (PDF)",
+                data=pdf_bytes,
+                file_name=f"gbv_charts_report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                key="charts_pdf",
+                use_container_width=True
+            )
+        else:
+            st.info("📦 Install 'reportlab' for PDF exports")
+    
+    with pdf_col3:
+        # Quick summary card
+        st.download_button(
+            label="📊 Download Summary Statistics",
+            data=f"""GBV ICT Readiness - Quick Statistics
+====================================
+Date: {datetime.now().strftime('%Y-%m-%d')}
+
+Regions Assessed: {len(regional_data)}
+Institutions Covered: {len(institutions)}
+Total Indicators: {len(all_indicators)}
+Total Responses: {total_responses:,}
+
+Response Breakdown:
+- Yes: {total_yes:,} ({(total_yes/total_responses*100) if total_responses > 0 else 0:.1f}%)
+- No: {total_no:,} ({(total_no/total_responses*100) if total_responses > 0 else 0:.1f}%)
+- Unknown: {total_unknown:,} ({(total_unknown/total_responses*100) if total_responses > 0 else 0:.1f}%)
+""",
+            file_name="gbv_quick_stats.txt",
+            mime="text/plain",
+            key="quick_stats",
+            use_container_width=True
+        )
 
 
 def show_daily_progress():
@@ -1600,10 +1849,10 @@ def show_daily_progress():
         fig.update_layout(
             xaxis_title="Date",
             yaxis_title="Cumulative Submissions",
-            height=400,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color='black')
+            height=320,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a')
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
@@ -1636,10 +1885,10 @@ def show_daily_progress():
         fig.update_layout(
             xaxis_title="Date",
             yaxis_title="Number of Submissions",
-            height=400,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color='black')
+            height=320,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a')
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
@@ -1656,10 +1905,10 @@ def show_daily_progress():
             name="Cumulative Submissions"
         ))
         fig.update_layout(
-            height=400,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color='black')
+            height=320,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a')
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
@@ -2414,8 +2663,36 @@ def main():
         color: #1f2937;
         font-size: 1.8rem;
         font-weight: 700;
-        margin-bottom: 1.5rem;
+        margin-top: 2rem;
+        margin-bottom: 2rem;
+        padding-top: 1rem;
         text-align: left;
+        clear: both;
+        position: relative;
+        z-index: 100;
+    }
+    
+    /* All markdown headings should have proper spacing */
+    .main h1, .main h2, .main h3, .main h4 {
+        margin-top: 2.5rem !important;
+        margin-bottom: 1.5rem !important;
+        padding-top: 1rem !important;
+        clear: both !important;
+        position: relative !important;
+        z-index: 100 !important;
+    }
+    
+    /* Subheadings within sections */
+    .main h3 {
+        font-size: 1.4rem;
+        font-weight: 600;
+        color: #374151;
+    }
+    
+    .main h4 {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #4b5563;
     }
     
     /* DATA TABLES - Styling for pandas dataframes (Regional Progress table, etc.) */
@@ -2436,52 +2713,74 @@ def main():
         margin-bottom: 1rem;
     }
     
-    /* PLOTLY CHART STYLING - Force white backgrounds and black text */
+    /* PLOTLY CHART STYLING - Transparent background to match white UI */
     .js-plotly-plot .plotly .main-svg {
-        background: white !important;
+        background: transparent !important;
     }
     
     .js-plotly-plot .plotly .bg {
-        fill: white !important;
+        fill: transparent !important;
     }
     
     .js-plotly-plot .plotly text {
-        fill: black !important;
-        color: black !important;
+        fill: #1a1a1a !important;
+        color: #1a1a1a !important;
     }
     
     .js-plotly-plot .plotly .xtick text,
     .js-plotly-plot .plotly .ytick text {
-        fill: black !important;
-        color: black !important;
+        fill: #1a1a1a !important;
+        color: #1a1a1a !important;
     }
     
     .js-plotly-plot .plotly .legend text {
-        fill: black !important;
-        color: black !important;
+        fill: #1a1a1a !important;
+        color: #1a1a1a !important;
     }
     
     .js-plotly-plot .plotly .title text {
-        fill: black !important;
-        color: black !important;
+        fill: #1a1a1a !important;
+        color: #1a1a1a !important;
     }
     
-    /* Force all plotly chart backgrounds to white */
+    /* Chart container with no background */
     .js-plotly-plot {
-        background: white !important;
+        background: transparent !important;
+        border: none !important;
+        border-radius: 0px !important;
+        padding: 0px !important;
     }
     
     .js-plotly-plot .plotly .bg rect {
-        fill: white !important;
+        fill: transparent !important;
     }
     
-    /* Ensure chart containers have white backgrounds */
-    [data-testid="stPlotlyChart"] {
-        background: white !important;
+    /* Ensure gridlines are visible */
+    .js-plotly-plot .plotly .gridlayer line {
+        stroke: #d1d5db !important;
     }
     
-    [data-testid="stPlotlyChart"] > div {
-        background: white !important;
+    /* Ensure axis lines are visible */
+    .js-plotly-plot .plotly .zerolinelayer line {
+        stroke: #9ca3af !important;
+    }
+    
+    /* CHART CONTAINERS - Base styles (final overrides at end of CSS) */
+    /* Keep Plotly internals transparent so card container shows through */
+    [data-testid="stPlotlyChart"] .js-plotly-plot,
+    [data-testid="stPlotlyChart"] .plot-container,
+    [data-testid="stPlotlyChart"] .svg-container,
+    [data-testid="stPlotlyChart"] svg,
+    [data-testid="stPlotlyChart"] .user-select-none {
+        background: transparent !important;
+        background-color: transparent !important;
+    }
+    
+    /* Remove pseudo-elements that might interfere */
+    [data-testid="stPlotlyChart"]::before,
+    [data-testid="stPlotlyChart"]::after {
+        content: none !important;
+        display: none !important;
     }
     
     /* SECTION DIVIDERS - White boxes with titles like "Overall Progress Gauge" */
@@ -2489,8 +2788,11 @@ def main():
         background: white;
         padding: 1rem;
         border-radius: 12px;
-        margin: 1rem 0;
+        margin: 2.5rem 0 1.5rem 0;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        clear: both;
+        position: relative;
+        z-index: 50;
     }
     
     .section-divider h3 {
@@ -2503,6 +2805,25 @@ def main():
         color: #6b7280;
         margin: 0.5rem 0 0 0;
         font-size: 0.9rem;
+    }
+    
+    /* Ensure Streamlit columns don't overflow */
+    [data-testid="column"] {
+        overflow: visible !important;
+        position: relative !important;
+    }
+    
+    /* Better spacing for content sections */
+    .stMarkdown {
+        margin-bottom: 1rem !important;
+    }
+    
+    /* Ensure horizontal rules (separators) have proper spacing */
+    hr {
+        margin: 3rem 0 !important;
+        border: none !important;
+        border-top: 1px solid #e5e7eb !important;
+        clear: both !important;
     }
     
     .top-performer-banner {
@@ -2636,6 +2957,103 @@ def main():
         font-size: 0.8rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
+    }
+
+    /* ==========================================================
+       FINAL OVERRIDES: CHART CARDS - Modern dashboard style
+       Matches clean card design with header area, white bg, shadow
+       ========================================================== */
+
+    /* Each Plotly chart gets a clean card container */
+    [data-testid="stPlotlyChart"] {
+        background: #ffffff !important;
+        border: 1px solid #d1d5db !important;
+        border-radius: 8px !important;
+        padding: 0 !important;
+        margin: 16px 0 24px 0 !important;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+        overflow: hidden !important;
+        clear: both !important;
+        position: relative !important;
+    }
+
+    /* Inner padding for chart content */
+    [data-testid="stPlotlyChart"] > div {
+        padding: 12px 16px 16px 16px !important;
+    }
+
+    /* Keep Plotly itself transparent so the card is the container */
+    [data-testid="stPlotlyChart"] .js-plotly-plot,
+    [data-testid="stPlotlyChart"] .plot-container,
+    [data-testid="stPlotlyChart"] .svg-container,
+    [data-testid="stPlotlyChart"] svg {
+        background: transparent !important;
+        background-color: transparent !important;
+    }
+
+    /* Modebar styled like reference image - top right icons */
+    [data-testid="stPlotlyChart"] .modebar-container {
+        position: absolute !important;
+        top: 8px !important;
+        right: 8px !important;
+        width: auto !important;
+        z-index: 10 !important;
+        background: rgba(255, 255, 255, 0.9) !important;
+        border-radius: 6px !important;
+        padding: 4px !important;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+    }
+
+    [data-testid="stPlotlyChart"] .modebar-group {
+        padding: 0 4px !important;
+    }
+
+    [data-testid="stPlotlyChart"] .modebar-btn {
+        color: #6b7280 !important;
+    }
+
+    [data-testid="stPlotlyChart"] .modebar-btn:hover {
+        color: #3b82f6 !important;
+    }
+
+    /* Chart title styling inside Plotly */
+    [data-testid="stPlotlyChart"] .g-gtitle {
+        font-family: 'Inter', -apple-system, sans-serif !important;
+    }
+
+    /* Headings above charts - clean spacing */
+    .main h2, .main h3, .main h4 {
+        scroll-margin-top: 90px;
+        clear: both !important;
+        position: relative !important;
+        z-index: 10 !important;
+    }
+
+    /* Section dividers get proper spacing before charts */
+    .section-divider + [data-testid="stPlotlyChart"] {
+        margin-top: 20px !important;
+    }
+
+    /* Headings after charts need breathing room */
+    [data-testid="stPlotlyChart"] + .stMarkdown h2,
+    [data-testid="stPlotlyChart"] + .stMarkdown h3,
+    [data-testid="stPlotlyChart"] + .stMarkdown h4 {
+        margin-top: 28px !important;
+    }
+
+    /* First chart in a column gets a small top margin */
+    [data-testid="column"] > div > [data-testid="stPlotlyChart"]:first-child {
+        margin-top: 8px !important;
+    }
+    
+    /* Charts in columns should have consistent sizing */
+    [data-testid="column"] [data-testid="stPlotlyChart"] {
+        margin: 8px 0 16px 0 !important;
+    }
+    
+    /* Side-by-side charts get equal height appearance */
+    [data-testid="stHorizontalBlock"] [data-testid="stPlotlyChart"] {
+        min-height: auto !important;
     }
     </style>
     """, unsafe_allow_html=True)
