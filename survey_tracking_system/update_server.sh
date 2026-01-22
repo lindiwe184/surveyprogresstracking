@@ -7,13 +7,21 @@ set -e  # Exit on error
 echo "🔄 Starting GBV Survey System Update..."
 echo "========================================="
 
-# 1. Navigate to project directory
-cd ~/surveyprogresstracking || cd /var/www/surveyprogresstracking || {
-    echo "❌ Could not find project directory. Please update the path."
-    exit 1
-}
+# Get the actual user (not root if using sudo)
+ACTUAL_USER=${SUDO_USER:-$USER}
+ACTUAL_HOME=$(eval echo ~$ACTUAL_USER)
 
-echo "📁 Current directory: $(pwd)"
+# 1. Get to project root (we should already be here)
+PROJECT_DIR=$(pwd)
+echo "📁 Current directory: $PROJECT_DIR"
+
+# Verify we're in the right place
+if [ ! -f "survey_tracking_system/backend/kobo_app.py" ]; then
+    echo "❌ Error: Not in project root directory!"
+    echo "   Please run this script from: ~/surveyprogresstracking"
+    echo "   Current location: $PROJECT_DIR"
+    exit 1
+fi
 
 # 2. Stop running services
 echo "⏸️  Stopping services..."
@@ -41,7 +49,7 @@ cd ../frontend
 pip3 install -r requirements.txt --upgrade
 
 # 6. Update database configuration
-cd ~/surveyprogresstracking/survey_tracking_system/backend
+cd "$PROJECT_DIR/survey_tracking_system/backend"
 echo ""
 echo "🔧 Updating database configuration..."
 
@@ -69,15 +77,15 @@ EOF
 echo "🔧 Updating systemd service files..."
 
 # Backend service
-sudo tee /etc/systemd/system/gbv-backend.service > /dev/null << 'BACKEND_SERVICE'
+sudo tee /etc/systemd/system/gbv-backend.service > /dev/null << BACKEND_SERVICE
 [Unit]
 Description=GBV Backend API
 After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=$USER
-WorkingDirectory=$HOME/surveyprogresstracking/survey_tracking_system/backend
+User=$ACTUAL_USER
+WorkingDirectory=$PROJECT_DIR/survey_tracking_system/backend
 Environment="PATH=/usr/bin:/usr/local/bin"
 ExecStart=/usr/bin/python3 kobo_app.py
 Restart=always
@@ -88,15 +96,15 @@ WantedBy=multi-user.target
 BACKEND_SERVICE
 
 # Frontend service
-sudo tee /etc/systemd/system/gbv-frontend.service > /dev/null << 'FRONTEND_SERVICE'
+sudo tee /etc/systemd/system/gbv-frontend.service > /dev/null << FRONTEND_SERVICE
 [Unit]
 Description=GBV Frontend Dashboard
 After=network.target gbv-backend.service
 
 [Service]
 Type=simple
-User=$USER
-WorkingDirectory=$HOME/surveyprogresstracking/survey_tracking_system/frontend
+User=$ACTUAL_USER
+WorkingDirectory=$PROJECT_DIR/survey_tracking_system/frontend
 Environment="PATH=/usr/bin:/usr/local/bin"
 ExecStart=/usr/bin/python3 -m streamlit run kobo_dashboard.py --server.port 8501 --server.address 0.0.0.0
 Restart=always
