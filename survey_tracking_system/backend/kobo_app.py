@@ -6,9 +6,14 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_jwt_extended import JWTManager
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Import authentication components
+from models import db, User, init_db
+from auth import auth_bp, admin_required
 
 
 def get_kobo_config():
@@ -111,6 +116,21 @@ def analyze_submissions(submissions: List[Dict]) -> Dict[str, Any]:
 def create_app():
     app = Flask(__name__)
     CORS(app)
+    
+    # Configure app for authentication
+    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+    app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key-change-in-production')
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql+psycopg://survey_user:Timer%402001@localhost:5432/survey_tracking')
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    
+    # Initialize JWT extension
+    jwt = JWTManager(app)
+    
+    # Initialize database
+    init_db(app)
+    
+    # Register authentication blueprint
+    app.register_blueprint(auth_bp)
     
     @app.get("/api/health")
     def health():

@@ -1,238 +1,179 @@
 #!/bin/bash
 
-# GBV Dashboard Deployment Script for Linux Server
-# This script automates the deployment process
+# GBV Survey Dashboard - Automated Deployment Script
+# This script sets up the complete application environment on Ubuntu
 
-set -e
+set -e  # Exit on any error
 
-echo "🚀 GBV Readiness Survey Dashboard Deployment Script"
-echo "=================================================="
+echo "🚀 Starting GBV Survey Dashboard Deployment..."
+echo "================================================"
 
-# Configuration
-APP_USER="gbvapp"
-APP_DIR="/home/$APP_USER/surveyprogresstracking"
-DOMAIN=""
-EMAIL=""
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Function to print colored output
-print_status() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Check if running as root
-if [[ $EUID -eq 0 ]]; then
-   print_error "This script should not be run as root for security reasons"
-   exit 1
-fi
-
-# Get domain and email from user
-read -p "Enter your domain name (e.g., dashboard.nsa.gov.na): " DOMAIN
-read -p "Enter your email for SSL certificate: " EMAIL
-
-if [[ -z "$DOMAIN" || -z "$EMAIL" ]]; then
-    print_error "Domain and email are required"
-    exit 1
-fi
-
-print_status "Deploying GBV Dashboard for domain: $DOMAIN"
-
-# Update system
-print_status "Updating system packages..."
+# Update system packages
+echo "📦 Updating system packages..."
 sudo apt update && sudo apt upgrade -y
 
-# Install required packages
-print_status "Installing required packages..."
-sudo apt install -y python3 python3-pip python3-venv nginx supervisor git curl ufw
+# Install essential packages
+echo "🔧 Installing essential packages..."
+sudo apt install -y curl wget gnupg2 software-properties-common apt-transport-https ca-certificates lsb-release
 
-# Create application user if it doesn't exist
-if ! id "$APP_USER" &>/dev/null; then
-    print_status "Creating application user: $APP_USER"
-    sudo useradd -m -s /bin/bash $APP_USER
-fi
-
-# Clone or update repository
-print_status "Setting up application code..."
-if [[ -d "$APP_DIR" ]]; then
-    print_warning "Application directory exists. Updating..."
-    cd $APP_DIR
-    git pull origin main
+# Install Docker
+echo "🐳 Installing Docker..."
+if ! command -v docker &> /dev/null; then
+    # Remove old Docker versions
+    sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    
+    # Add Docker GPG key
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    
+    # Add Docker repository
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    
+    # Install Docker
+    sudo apt update
+    sudo apt install -y docker-ce docker-ce-cli containerd.io
+    
+    # Add user to docker group
+    sudo usermod -aG docker $USER
+    
+    echo "✅ Docker installed successfully"
 else
-    print_status "Cloning repository..."
-    sudo -u $APP_USER git clone https://github.com/lindiwe184/surveyprogresstracking.git $APP_DIR
+    echo "✅ Docker already installed"
 fi
 
-cd $APP_DIR
-
-# Create virtual environment
-print_status "Setting up Python virtual environment..."
-sudo -u $APP_USER python3 -m venv venv
-sudo -u $APP_USER bash -c "source venv/bin/activate && pip install --upgrade pip"
-
-# Install dependencies
-print_status "Installing Python dependencies..."
-sudo -u $APP_USER bash -c "source venv/bin/activate && pip install -r backend/requirements.txt"
-sudo -u $APP_USER bash -c "source venv/bin/activate && pip install -r frontend/requirements.txt"
-sudo -u $APP_USER bash -c "source venv/bin/activate && pip install gunicorn"
-
-# Set up environment file
-print_status "Setting up environment configuration..."
-if [[ ! -f "backend/.env" ]]; then
-    sudo -u $APP_USER cp backend/env.template backend/.env
-    print_warning "Please edit backend/.env with your KoboToolbox credentials:"
-    print_warning "sudo -u $APP_USER nano $APP_DIR/backend/.env"
-    read -p "Press enter when you've configured the .env file..."
+# Install Docker Compose
+echo "🔨 Installing Docker Compose..."
+if ! command -v docker-compose &> /dev/null; then
+    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+    echo "✅ Docker Compose installed successfully"
+else
+    echo "✅ Docker Compose already installed"
 fi
 
-# Create supervisor configuration for backend
-print_status "Configuring backend service..."
-sudo tee /etc/supervisor/conf.d/gbv-backend.conf > /dev/null <<EOF
-[program:gbv-backend]
-command=$APP_DIR/venv/bin/gunicorn -w 4 -b 127.0.0.1:5002 --timeout 120 kobo_app:app
-directory=$APP_DIR/backend
-user=$APP_USER
-autostart=true
-autorestart=true
-redirect_stderr=true
-stdout_logfile=/var/log/gbv-backend.log
-environment=PATH="$APP_DIR/venv/bin"
-EOF
+# Install Python and pip
+echo "🐍 Installing Python..."
+sudo apt install -y python3 python3-pip python3-venv
 
-# Create supervisor configuration for frontend
-print_status "Configuring frontend service..."
-sudo tee /etc/supervisor/conf.d/gbv-frontend.conf > /dev/null <<EOF
-[program:gbv-frontend]
-command=$APP_DIR/venv/bin/streamlit run kobo_dashboard.py --server.port 8501 --server.address 127.0.0.1 --server.headless true
-directory=$APP_DIR/frontend
-user=$APP_USER
-autostart=true
-autorestart=true
-redirect_stderr=true
-stdout_logfile=/var/log/gbv-frontend.log
-environment=PATH="$APP_DIR/venv/bin"
-EOF
+# Install Nginx
+echo "🌐 Installing Nginx..."
+sudo apt install -y nginx
 
-# Create Nginx configuration
-print_status "Configuring Nginx..."
-sudo tee /etc/nginx/sites-available/gbv-dashboard > /dev/null <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
+# Install Supervisor for process management
+echo "👮 Installing Supervisor..."
+sudo apt install -y supervisor
 
-    location / {
-        proxy_pass http://127.0.0.1:8501;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_read_timeout 86400;
-    }
+# Create application directories
+echo "📁 Creating application directories..."
+sudo mkdir -p /var/log/gbv-dashboard
+sudo mkdir -p /etc/gbv-dashboard
+sudo chown -R $USER:$USER /var/log/gbv-dashboard
 
-    location /api {
-        proxy_pass http://127.0.0.1:5002;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
+# Copy environment template
+echo "📋 Setting up environment configuration..."
+if [ -f "backend/env.template" ]; then
+    cp backend/env.template backend/.env
+    echo "✅ Environment template copied to backend/.env"
+    echo "⚠️  Remember to update backend/.env with your actual KoboToolbox credentials"
+fi
 
-# Enable Nginx site
+# Build and start Docker containers
+echo "🏗️  Building Docker containers..."
+docker-compose build
+
+echo "🚀 Starting services..."
+docker-compose up -d
+
+# Configure Nginx reverse proxy
+echo "🔧 Configuring Nginx..."
+sudo cp nginx.conf /etc/nginx/sites-available/gbv-dashboard
 sudo ln -sf /etc/nginx/sites-available/gbv-dashboard /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
 # Test Nginx configuration
-print_status "Testing Nginx configuration..."
 sudo nginx -t
 
-# Configure firewall
-print_status "Configuring firewall..."
-sudo ufw --force enable
-sudo ufw allow ssh
-sudo ufw allow 'Nginx Full'
-
-# Start services
-print_status "Starting services..."
-sudo supervisorctl reread
-sudo supervisorctl update
-sudo supervisorctl start gbv-backend
-sudo supervisorctl start gbv-frontend
+# Restart Nginx
 sudo systemctl restart nginx
+sudo systemctl enable nginx
 
-# Install SSL certificate
-print_status "Installing SSL certificate..."
-sudo snap install core; sudo snap refresh core
-sudo snap install --classic certbot
-sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+# Configure firewall
+echo "🔥 Configuring firewall..."
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw --force enable
 
-# Get SSL certificate
-sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL
-
-# Set up automatic renewal
-echo "0 12 * * * /usr/bin/certbot renew --quiet" | sudo crontab -
-
-# Create backup script
-print_status "Setting up backup script..."
-sudo tee /usr/local/bin/gbv-backup.sh > /dev/null <<EOF
-#!/bin/bash
-BACKUP_DIR="/backup/gbv-dashboard"
-DATE=\$(date +%Y%m%d_%H%M%S)
-
-mkdir -p \$BACKUP_DIR
-tar -czf \$BACKUP_DIR/gbv-app-\$DATE.tar.gz -C /home/$APP_USER surveyprogresstracking
-
-# Keep only last 7 days of backups
-find \$BACKUP_DIR -name "*.tar.gz" -mtime +7 -delete
+# Setup log rotation
+echo "📊 Setting up log rotation..."
+sudo tee /etc/logrotate.d/gbv-dashboard > /dev/null <<EOF
+/var/log/gbv-dashboard/*.log {
+    daily
+    missingok
+    rotate 52
+    compress
+    delaycompress
+    notifempty
+    create 644 $USER $USER
+}
 EOF
 
-sudo chmod +x /usr/local/bin/gbv-backup.sh
+# Create systemd service for auto-restart
+echo "⚙️  Creating systemd service..."
+sudo tee /etc/systemd/system/gbv-dashboard.service > /dev/null <<EOF
+[Unit]
+Description=GBV Survey Dashboard
+Requires=docker.service
+After=docker.service
 
-# Set up daily backup
-echo "0 2 * * * /usr/local/bin/gbv-backup.sh" | sudo crontab -
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$(pwd)
+ExecStart=/usr/local/bin/docker-compose up -d
+ExecStop=/usr/local/bin/docker-compose down
+TimeoutStartSec=0
 
-# Final status check
-print_status "Checking service status..."
-sleep 5
+[Install]
+WantedBy=multi-user.target
+EOF
 
-if curl -s http://localhost:5002/api/health > /dev/null; then
-    print_status "✅ Backend service is running"
-else
-    print_error "❌ Backend service failed to start"
-fi
+# Enable and start the service
+sudo systemctl daemon-reload
+sudo systemctl enable gbv-dashboard.service
 
-if curl -s http://localhost:8501/_stcore/health > /dev/null; then
-    print_status "✅ Frontend service is running"
-else
-    print_error "❌ Frontend service failed to start"
-fi
+# Wait for services to be ready
+echo "⏳ Waiting for services to start..."
+sleep 30
 
-print_status "🎉 Deployment completed!"
-print_status "Your GBV Dashboard should be accessible at: https://$DOMAIN"
-print_status ""
-print_status "Useful commands:"
-print_status "  - Check services: sudo supervisorctl status"
-print_status "  - View logs: sudo tail -f /var/log/gbv-backend.log"
-print_status "  - Restart services: sudo supervisorctl restart gbv-backend gbv-frontend"
-print_status ""
-print_warning "Don't forget to:"
-print_warning "1. Configure your KoboToolbox credentials in $APP_DIR/backend/.env"
-print_warning "2. Set up DNS records for your domain"
-print_warning "3. Test the application thoroughly"
+# Check service status
+echo "🔍 Checking service status..."
+docker-compose ps
+
+# Display completion message
+echo ""
+echo "🎉 DEPLOYMENT COMPLETED SUCCESSFULLY!"
+echo "======================================"
+echo ""
+echo "📍 Your GBV Survey Dashboard is now running!"
+echo ""
+echo "🌐 Access URLs:"
+echo "   • Main Dashboard: http://$(hostname -I | awk '{print $1}')"
+echo "   • Backend API: http://$(hostname -I | awk '{print $1}'):5000"
+echo ""
+echo "📋 Next Steps:"
+echo "   1. Update backend/.env with your KoboToolbox credentials"
+echo "   2. Restart services: docker-compose restart"
+echo "   3. Monitor logs: docker-compose logs -f"
+echo ""
+echo "📊 Service Management:"
+echo "   • Start: sudo systemctl start gbv-dashboard"
+echo "   • Stop: sudo systemctl stop gbv-dashboard"
+echo "   • Status: sudo systemctl status gbv-dashboard"
+echo "   • Logs: docker-compose logs -f"
+echo ""
+echo "🔧 Troubleshooting:"
+echo "   • Check service status: docker-compose ps"
+echo "   • View logs: docker-compose logs"
+echo "   • Restart services: docker-compose restart"
+echo ""
+echo "✅ Deployment completed at $(date)"

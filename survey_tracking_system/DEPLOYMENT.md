@@ -1,369 +1,366 @@
-# GBV Readiness Survey Dashboard - Linux Server Deployment Guide
+# GBV Survey Progress Tracking System - Deployment Guide
 
-This guide covers deploying the GBV Readiness Survey Dashboard on a Linux server with production-ready configuration.
+## Overview
+This guide provides step-by-step instructions for deploying the GBV Survey Dashboard on a Linux server (Ubuntu/Debian).
 
-## Server Requirements
+## Prerequisites
+- Ubuntu 20.04+ or Debian 11+ server
+- Root or sudo access
+- Minimum 2GB RAM, 10GB disk space
+- Internet connectivity
 
-### Minimum System Requirements
-- **OS**: Ubuntu 20.04 LTS or later / CentOS 8+ / RHEL 8+
-- **RAM**: 2GB minimum, 4GB recommended
-- **CPU**: 2 cores minimum
-- **Storage**: 20GB minimum
-- **Network**: Public IP with ports 80/443 access
+## Quick Deployment (Automated)
 
-### Software Requirements
-- Python 3.8+
-- Nginx (reverse proxy)
-- Supervisor (process management)
-- Git
-- SSL certificate (Let's Encrypt recommended)
+### 1. Clone Repository
+```bash
+git clone https://github.com/lindiwe184/surveyprogresstracking.git
+cd surveyprogresstracking
+```
 
-## Deployment Methods
+### 2. Run Automated Deployment
+```bash
+chmod +x deploy.sh
+sudo ./deploy.sh
+```
 
-### Option 1: Manual Deployment (Recommended for Learning)
+The script will automatically:
+- Install Docker and Docker Compose
+- Install Python, Nginx, and dependencies
+- Build and start all services
+- Configure reverse proxy and firewall
+- Set up monitoring and log rotation
 
-#### 1. Server Setup
+### 3. Configure Environment
+```bash
+# Edit environment variables
+nano backend/.env
+
+# Add your KoboToolbox credentials:
+KOBO_API_URL=https://your-kobo-server.com/api/v2/
+KOBO_TOKEN=your_api_token_here
+DATABASE_URL=postgresql+psycopg2://survey_user:survey_password@localhost:5432/survey_tracking
+```
+
+### 4. Restart Services
+```bash
+docker-compose restart
+```
+
+## Manual Deployment
+
+If you prefer manual installation or the automated script fails:
+
+### Step 1: System Preparation
 ```bash
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Install required packages
-sudo apt install -y python3 python3-pip python3-venv nginx supervisor git curl
-
-# Create application user
-sudo useradd -m -s /bin/bash gbvapp
-sudo usermod -aG sudo gbvapp
+# Install essential packages
+sudo apt install -y curl wget gnupg2 software-properties-common
 ```
 
-#### 2. Application Deployment
+### Step 2: Install Docker
 ```bash
-# Switch to application user
-sudo su - gbvapp
+# Remove old Docker versions
+sudo apt remove docker docker-engine docker.io containerd runc
 
+# Add Docker GPG key and repository
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# Add user to docker group
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+### Step 3: Install Docker Compose
+```bash
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+```
+
+### Step 4: Install Additional Dependencies
+```bash
+sudo apt install -y python3 python3-pip nginx supervisor
+```
+
+### Step 5: Application Setup
+```bash
 # Clone repository
 git clone https://github.com/lindiwe184/surveyprogresstracking.git
 cd surveyprogresstracking
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Set up environment
+cp backend/env.template backend/.env
+# Edit .env with your actual credentials
 
-# Install backend dependencies
-cd backend
-pip install -r requirements.txt
-pip install gunicorn  # Production WSGI server
-
-# Install frontend dependencies
-cd ../frontend
-pip install -r requirements.txt
-
-# Set up environment variables
-cd ../backend
-cp env.template .env
-# Edit .env with your production KoboToolbox credentials
-nano .env
+# Build and start services
+docker-compose build
+docker-compose up -d
 ```
 
-#### 3. Environment Configuration
+### Step 6: Configure Nginx
 ```bash
-# Backend .env file
-KOBO_TOKEN=your_production_kobo_token
-KOBO_ASSET_ID=your_survey_asset_id
-KOBO_BASE_URL=https://kf.kobotoolbox.org
-FLASK_PORT=5002
-FLASK_ENV=production
-```
-
-### Option 2: Docker Deployment (Recommended for Production)
-
-#### 1. Install Docker
-```bash
-# Install Docker
-curl -fsSL https://get.docker.com -o get-docker.sh
-sudo sh get-docker.sh
-sudo usermod -aG docker $USER
-
-# Install Docker Compose
-sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-sudo chmod +x /usr/local/bin/docker-compose
-```
-
-## Process Management with Supervisor
-
-### Backend Service Configuration
-Create `/etc/supervisor/conf.d/gbv-backend.conf`:
-```ini
-[program:gbv-backend]
-command=/home/gbvapp/surveyprogresstracking/venv/bin/gunicorn -w 4 -b 127.0.0.1:5002 kobo_app:app
-directory=/home/gbvapp/surveyprogresstracking/backend
-user=gbvapp
-autostart=true
-autorestart=true
-redirect_stderr=true
-stdout_logfile=/var/log/gbv-backend.log
-environment=PATH="/home/gbvapp/surveyprogresstracking/venv/bin"
-```
-
-### Frontend Service Configuration
-Create `/etc/supervisor/conf.d/gbv-frontend.conf`:
-```ini
-[program:gbv-frontend]
-command=/home/gbvapp/surveyprogresstracking/venv/bin/streamlit run kobo_dashboard.py --server.port 8501 --server.address 127.0.0.1 --server.headless true
-directory=/home/gbvapp/surveyprogresstracking/frontend
-user=gbvapp
-autostart=true
-autorestart=true
-redirect_stderr=true
-stdout_logfile=/var/log/gbv-frontend.log
-environment=PATH="/home/gbvapp/surveyprogresstracking/venv/bin"
-```
-
-### Start Services
-```bash
-# Reload supervisor configuration
-sudo supervisorctl reread
-sudo supervisorctl update
-
-# Start services
-sudo supervisorctl start gbv-backend
-sudo supervisorctl start gbv-frontend
-
-# Check status
-sudo supervisorctl status
-```
-
-## Nginx Reverse Proxy Configuration
-
-### Create Nginx Configuration
-Create `/etc/nginx/sites-available/gbv-dashboard`:
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com www.your-domain.com;
-
-    # Redirect HTTP to HTTPS
-    return 301 https://$server_name$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name your-domain.com www.your-domain.com;
-
-    # SSL Configuration (after setting up Let's Encrypt)
-    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
-    
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
-    add_header Content-Security-Policy "default-src 'self' http: https: data: blob: 'unsafe-inline'" always;
-
-    # Frontend (Streamlit Dashboard)
-    location / {
-        proxy_pass http://127.0.0.1:8501;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-        proxy_read_timeout 86400;
-    }
-
-    # Backend API
-    location /api {
-        proxy_pass http://127.0.0.1:5002;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # Static files (if any)
-    location /static {
-        alias /home/gbvapp/surveyprogresstracking/frontend/static;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-}
-```
-
-### Enable Nginx Configuration
-```bash
-# Enable site
+# Copy Nginx configuration
+sudo cp nginx.conf /etc/nginx/sites-available/gbv-dashboard
 sudo ln -s /etc/nginx/sites-available/gbv-dashboard /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
 
-# Test configuration
+# Test and restart Nginx
 sudo nginx -t
-
-# Restart Nginx
 sudo systemctl restart nginx
+sudo systemctl enable nginx
 ```
 
-## SSL Certificate Setup (Let's Encrypt)
+### Step 7: Configure Firewall
+```bash
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+```
 
+## Configuration
+
+### Environment Variables (backend/.env)
+```bash
+# KoboToolbox Configuration
+KOBO_API_URL=https://kf.kobotoolbox.org/api/v2/
+KOBO_TOKEN=your_actual_token_here
+
+# Database Configuration
+DATABASE_URL=postgresql+psycopg2://survey_user:survey_password@localhost:5432/survey_tracking
+
+# Application Settings
+DEBUG=False
+SECRET_KEY=your_secret_key_here
+
+# Logging
+LOG_LEVEL=INFO
+LOG_FILE=/var/log/gbv-dashboard/app.log
+```
+
+### SSL/TLS Configuration (Optional but Recommended)
+
+#### Using Let's Encrypt (Free SSL)
 ```bash
 # Install Certbot
-sudo apt install snapd
-sudo snap install core; sudo snap refresh core
-sudo snap install --classic certbot
-sudo ln -s /snap/bin/certbot /usr/bin/certbot
+sudo apt install certbot python3-certbot-nginx
 
 # Obtain SSL certificate
-sudo certbot --nginx -d your-domain.com -d www.your-domain.com
+sudo certbot --nginx -d your-domain.com
 
-# Verify auto-renewal
-sudo certbot renew --dry-run
+# Auto-renewal
+sudo systemctl enable certbot.timer
 ```
 
-## Firewall Configuration
-
+#### Using Self-Signed Certificate
 ```bash
-# Configure UFW firewall
-sudo ufw allow ssh
-sudo ufw allow 'Nginx Full'
-sudo ufw --force enable
+# Create SSL directory
+sudo mkdir -p /etc/nginx/ssl
+
+# Generate self-signed certificate
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/nginx/ssl/gbv-dashboard.key \
+    -out /etc/nginx/ssl/gbv-dashboard.crt
+
+# Update nginx.conf to include SSL configuration
+```
+
+## Service Management
+
+### Docker Services
+```bash
+# Start services
+docker-compose up -d
+
+# Stop services
+docker-compose down
+
+# Restart services
+docker-compose restart
+
+# View logs
+docker-compose logs -f
+
+# Check status
+docker-compose ps
+```
+
+### System Services
+```bash
+# Check application service
+sudo systemctl status gbv-dashboard
+
+# Start/Stop/Restart
+sudo systemctl start gbv-dashboard
+sudo systemctl stop gbv-dashboard
+sudo systemctl restart gbv-dashboard
+
+# Check Nginx
+sudo systemctl status nginx
+sudo nginx -t  # Test configuration
 ```
 
 ## Monitoring and Maintenance
 
-### Log Management
+### Log Files
+- Application logs: `/var/log/gbv-dashboard/`
+- Nginx logs: `/var/log/nginx/`
+- Docker logs: `docker-compose logs`
+
+### Health Checks
 ```bash
-# View application logs
-sudo tail -f /var/log/gbv-backend.log
-sudo tail -f /var/log/gbv-frontend.log
+# Check if services are running
+curl http://localhost/health
 
-# View Nginx logs
-sudo tail -f /var/log/nginx/access.log
-sudo tail -f /var/log/nginx/error.log
+# Check Docker containers
+docker-compose ps
 
-# View supervisor logs
-sudo supervisorctl tail gbv-backend
-sudo supervisorctl tail gbv-frontend
-```
-
-### System Monitoring
-```bash
-# Install monitoring tools
-sudo apt install htop iotop nethogs
-
-# Monitor resources
-htop                    # CPU and memory usage
-iotop                   # Disk I/O
-nethogs                 # Network usage per process
+# Check system resources
+htop
+df -h
 ```
 
 ### Backup Strategy
 ```bash
-# Create backup script
-sudo nano /usr/local/bin/gbv-backup.sh
+# Database backup (PostgreSQL)
+pg_dump -U survey_user -h localhost survey_tracking > backup_$(date +%Y%m%d).sql
 
-#!/bin/bash
-BACKUP_DIR="/backup/gbv-dashboard"
-DATE=$(date +%Y%m%d_%H%M%S)
-
-# Create backup directory
-mkdir -p $BACKUP_DIR
-
-# Backup application code
-tar -czf $BACKUP_DIR/gbv-app-$DATE.tar.gz -C /home/gbvapp surveyprogresstracking
-
-# Backup database (if applicable)
-cp /home/gbvapp/surveyprogresstracking/backend/survey_tracking.db $BACKUP_DIR/database-$DATE.db
-
-# Keep only last 7 days of backups
-find $BACKUP_DIR -name "*.tar.gz" -mtime +7 -delete
-find $BACKUP_DIR -name "*.db" -mtime +7 -delete
-
-# Make executable
-sudo chmod +x /usr/local/bin/gbv-backup.sh
-
-# Add to crontab for daily backups
-echo "0 2 * * * /usr/local/bin/gbv-backup.sh" | sudo crontab -
+# Configuration backup
+tar -czf config_backup_$(date +%Y%m%d).tar.gz backend/.env nginx.conf docker-compose.yml
 ```
 
-## Performance Optimization
-
-### Application Level
+### Updates
 ```bash
-# Backend optimization
-# Use more Gunicorn workers based on CPU cores
-# Workers = (2 x CPU cores) + 1
+# Update application code
+git pull origin main
+docker-compose build
+docker-compose up -d
 
-# Frontend optimization
-# Configure Streamlit for production in ~/.streamlit/config.toml
-mkdir -p ~/.streamlit
-cat > ~/.streamlit/config.toml << EOF
-[server]
-headless = true
-port = 8501
-enableCORS = false
-enableXsrfProtection = false
-
-[browser]
-gatherUsageStats = false
-EOF
-```
-
-### Server Level
-```bash
-# Increase file descriptor limits
-echo "* soft nofile 65535" | sudo tee -a /etc/security/limits.conf
-echo "* hard nofile 65535" | sudo tee -a /etc/security/limits.conf
-
-# Optimize kernel parameters
-sudo tee -a /etc/sysctl.conf << EOF
-net.core.somaxconn = 65535
-net.ipv4.tcp_max_syn_backlog = 65535
-net.ipv4.ip_local_port_range = 1024 65535
-EOF
-
-sudo sysctl -p
+# Update system packages
+sudo apt update && sudo apt upgrade -y
 ```
 
 ## Troubleshooting
 
 ### Common Issues
-1. **Service won't start**: Check logs with `sudo supervisorctl tail servicename`
-2. **502 Bad Gateway**: Verify backend is running on correct port
-3. **SSL issues**: Check certificate with `sudo certbot certificates`
-4. **High memory usage**: Monitor with `htop` and adjust worker counts
 
-### Health Checks
+#### Services Won't Start
 ```bash
-# Check if services are running
-curl http://localhost:5002/api/health    # Backend health
-curl http://localhost:8501/_stcore/health  # Frontend health
+# Check Docker status
+sudo systemctl status docker
 
-# Check from outside
-curl https://your-domain.com/api/health
+# Check logs
+docker-compose logs
+
+# Rebuild containers
+docker-compose down
+docker-compose build --no-cache
+docker-compose up -d
 ```
 
-## Security Best Practices
+#### Port Conflicts
+```bash
+# Check what's using ports
+sudo netstat -tlnp | grep :80
+sudo netstat -tlnp | grep :8501
 
-1. **Keep system updated**: `sudo apt update && sudo apt upgrade`
-2. **Use strong passwords**: For all accounts
-3. **Disable root SSH**: Edit `/etc/ssh/sshd_config`
-4. **Regular backups**: Automated and tested
-5. **Monitor logs**: Set up log monitoring/alerting
-6. **Firewall rules**: Only open necessary ports
-7. **SSL/TLS**: Always use HTTPS in production
+# Kill conflicting processes
+sudo pkill -f nginx
+```
 
-## Deployment Checklist
+#### Permission Issues
+```bash
+# Fix file permissions
+sudo chown -R $USER:$USER .
+chmod +x deploy.sh
 
-- [ ] Server provisioned with adequate resources
-- [ ] Domain name configured with DNS
-- [ ] SSL certificate installed and auto-renewal configured
-- [ ] Application deployed and running
-- [ ] Database backed up (if applicable)
-- [ ] Monitoring and logging configured
-- [ ] Firewall rules applied
-- [ ] Backup strategy implemented
-- [ ] Performance optimization applied
-- [ ] Security hardening completed
+# Fix log directory permissions
+sudo chown -R $USER:$USER /var/log/gbv-dashboard
+```
 
-Your GBV Readiness Survey Dashboard should now be accessible at `https://your-domain.com` with production-grade reliability and security.
+#### Database Issues
+```bash
+# Reset database
+rm database/survey_tracking.db
+docker-compose restart
+```
+
+### Performance Optimization
+
+#### Resource Limits
+Edit `docker-compose.yml` to add resource limits:
+```yaml
+services:
+  gbv-dashboard:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+```
+
+#### Nginx Tuning
+```bash
+# Edit /etc/nginx/nginx.conf
+worker_processes auto;
+worker_connections 1024;
+```
+
+## Security Considerations
+
+### Firewall Configuration
+```bash
+# Allow only necessary ports
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+```
+
+### Regular Updates
+```bash
+# Set up automatic security updates
+sudo apt install unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades
+```
+
+### Access Control
+- Use strong passwords for server access
+- Implement SSH key authentication
+- Consider VPN access for sensitive data
+- Regularly rotate API keys
+
+## Support and Documentation
+
+### Useful Commands
+```bash
+# View real-time logs
+docker-compose logs -f gbv-dashboard
+
+# Access container shell
+docker-compose exec gbv-dashboard bash
+
+# Check resource usage
+docker stats
+
+# Cleanup unused resources
+docker system prune -f
+```
+
+### Additional Resources
+- [Docker Documentation](https://docs.docker.com/)
+- [Nginx Documentation](https://nginx.org/en/docs/)
+- [Streamlit Documentation](https://docs.streamlit.io/)
+- [KoboToolbox API Documentation](https://support.kobotoolbox.org/api.html)
+
+---
+
+**Note**: Always test deployments in a staging environment before production use.

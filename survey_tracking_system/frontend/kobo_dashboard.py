@@ -1,6 +1,8 @@
 import os
+import io
 from datetime import datetime, timedelta
 from typing import Dict, List, Any
+from functools import lru_cache
 
 import pandas as pd
 import requests
@@ -8,14 +10,23 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import pytz
+import numpy as np
 
 from config import get_api_base_url
+from auth_manager import auth_manager, authenticated_request
 
 
 API_BASE_URL = get_api_base_url().rstrip("/")
 
 # Namibia timezone for real-time updates
 TZ = pytz.timezone("Africa/Windhoek")
+
+# =============================================
+# CACHING CONFIGURATION
+# =============================================
+# Cache TTL in seconds (2 minutes for real-time feel, but reduces API calls)
+CACHE_TTL = 120
+
 
 def now_cat():
     """Return real-time Namibia local time"""
@@ -32,11 +43,33 @@ def clean_timestamp(ts):
         return None
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching data...")
+def fetch_json_cached(path: str) -> Dict[str, Any]:
+    """Fetch JSON data from the API with caching."""
+    try:
+        url = f"{API_BASE_URL}{path}"
+        # Increase timeout for KoBoToolbox API which can be slow
+        resp = requests.get(url, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as exc:
+        return {"_fetch_error": str(exc)}
+
+
 def fetch_json(path: str, params=None) -> Dict[str, Any]:
     """Fetch JSON data from the API."""
-    url = f"{API_BASE_URL}{path}"
+    # Use cached version for common endpoints without params
+    if params is None and path in ["/api/kobo/summary", "/api/kobo/submissions", "/api/health"]:
+        result = fetch_json_cached(path)
+        if "_fetch_error" in result:
+            st.error(f"Failed to fetch {path}: {result['_fetch_error']}")
+            return {}
+        return result
+    
+    # Non-cached fetch for parameterized requests
     try:
-        resp = requests.get(url, params=params or {}, timeout=15)
+        url = f"{API_BASE_URL}{path}"
+        resp = requests.get(url, params=params or {}, timeout=60)
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException as exc:
@@ -44,18 +77,114 @@ def fetch_json(path: str, params=None) -> Dict[str, Any]:
         return {}
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Loading survey data...")
+def get_all_data():
+    """Fetch and cache all data in one call to avoid multiple API requests."""
+    summary = fetch_json_cached("/api/kobo/summary")
+    submissions_data = fetch_json_cached("/api/kobo/submissions")
+    
+    # Check for fetch errors
+    has_summary_error = "_fetch_error" in summary
+    has_submissions_error = "_fetch_error" in submissions_data
+    
+    # Extract submissions from response
+    if has_submissions_error:
+        submissions = []
+    elif isinstance(submissions_data, dict) and "submissions" in submissions_data:
+        submissions = submissions_data.get("submissions", [])
+    elif isinstance(submissions_data, list):
+        submissions = submissions_data
+    else:
+        submissions = []
+    
+    return {
+        "summary": {} if has_summary_error else summary,
+        "submissions": submissions,
+        "by_region": {} if has_summary_error else summary.get("by_region", {}),
+        "by_date": {} if has_summary_error else summary.get("by_date", {}),
+        "total_submissions": 0 if has_summary_error else summary.get("total_submissions", len(submissions))
+    }
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def process_institutions(submissions: List[Dict]) -> List[Dict]:
+    """Process and cache institution data from submissions."""
+    institutions = []
+    for sub in submissions:
+        inst_name = get_institution_name(sub)
+        region = get_region_name(sub)
+        institutions.append({
+            "name": inst_name,
+            "region": region,
+            "data": sub
+        })
+    institutions.sort(key=lambda x: (x["region"], x["name"]))
+    return institutions
+
+
+def get_institution_name(sub: Dict) -> str:
+    """Extract institution name from submission."""
+    inst = sub.get("grp_login/institution", "") or sub.get("institution", "") or sub.get("grp_login/institution_name", "")
+    if inst:
+        return inst.replace("_", " ").title()
+    return "Unknown Institution"
+
+
+def get_region_name(sub: Dict) -> str:
+    """Extract and normalize region name from submission."""
+    region = sub.get("grp_login/resp_region_display", "") or sub.get("resp_region_display", "") or sub.get("region", "")
+    if not region:
+        return "Unknown"
+    region_lower = region.lower()
+    if "kavango" in region_lower:
+        if "east" in region_lower:
+            return "Kavango East"
+        elif "west" in region_lower:
+            return "Kavango West"
+        return "Kavango"
+    if "hardap" in region_lower:
+        return "Hardap"
+    if "erongo" in region_lower:
+        return "Erongo"
+    if "ohangwena" in region_lower:
+        return "Ohangwena"
+    if "omaheke" in region_lower:
+        return "Omaheke"
+    return region.title()
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def group_by_region(submissions: List[Dict]) -> Dict[str, List[Dict]]:
+    """Group submissions by region with caching."""
+    regional_data = {}
+    for sub in submissions:
+        region = get_region_name(sub)
+        if region == "Unknown":
+            continue
+        if region not in regional_data:
+            regional_data[region] = []
+        regional_data[region].append(sub)
+    return regional_data
+
+
 def show_national_overview():
     """Display national overview with targets and progress."""
     st.markdown('<h2 class="section-header">National Overview</h2>', unsafe_allow_html=True)
     
-    # Fetch summary data
-    summary_data = fetch_json("/api/kobo/summary")
-    if not summary_data:
-        st.error("Unable to fetch survey data")
+    # Use cached data
+    all_data = get_all_data()
+    
+    # Check if we have any data (either from summary or submissions)
+    total_submissions = all_data["total_submissions"]
+    if total_submissions == 0 and not all_data["submissions"]:
+        # Try to count submissions directly
+        total_submissions = len(all_data["submissions"]) if all_data["submissions"] else 0
+    
+    if total_submissions == 0 and not all_data["by_date"]:
+        st.warning("No survey data available yet. Data will appear once submissions are received.")
         return
     
-    total_submissions = summary_data.get("total_submissions", 0)
-    by_date = summary_data.get("by_date", {})
+    by_date = all_data["by_date"]
     
     # Survey targets - 5-day survey period (Monday to Friday)
     TARGET_SURVEYS = 90  # Total target for active survey regions (21+16+18+20+15)
@@ -176,7 +305,7 @@ def show_national_overview():
             }
         }
     ))
-    fig.update_layout(height=400)
+    fig.update_layout(height=400, plot_bgcolor='white', paper_bgcolor='white', font=dict(color='black'))
     st.plotly_chart(fig, use_container_width=True)
     
     # Professional refresh section
@@ -196,29 +325,23 @@ def show_regional_breakdown():
     """Display regional breakdown of survey progress."""
     st.markdown('<h2 class="section-header">Regional Analysis</h2>', unsafe_allow_html=True)
     
-    # Fetch summary data
-    summary_data = fetch_json("/api/kobo/summary")
-    if not summary_data:
-        st.error("Unable to fetch survey data")
+    # Use cached data
+    all_data = get_all_data()
+    
+    # Get submissions for regional analysis
+    raw_submissions = all_data["submissions"]
+    
+    if not raw_submissions:
+        st.warning("No survey data available yet.")
         return
     
-    by_region = summary_data.get("by_region", {})
-    
-    if not by_region:
-        st.warning("No regional data available")
-        return
+    by_region = all_data["by_region"]
     
     # Active survey regions only (where surveys are taking place)
     all_regions = ["hardap", "erongo", "kavango", "ohangwena", "omaheke"]
     
-    # Get raw submissions for accurate region mapping
-    submissions_data = fetch_json("/api/kobo/submissions")
-    if submissions_data and isinstance(submissions_data, dict):
-        raw_submissions = submissions_data.get("submissions", [])
-    elif submissions_data and isinstance(submissions_data, list):
-        raw_submissions = submissions_data
-    else:
-        raw_submissions = []
+    # Use cached submissions
+    raw_submissions = all_data["submissions"]
     
     def map_region_to_code(reported_region):
         """Map reported region to standardized region code."""
@@ -345,21 +468,1052 @@ def show_regional_breakdown():
             color_continuous_scale="RdYlGn",
             title="Completion Rate (%)"
         )
-        fig.update_layout(height=400)
+        fig.update_layout(
+            height=400,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font=dict(color='black')
+        )
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
         st.plotly_chart(fig, use_container_width=True)
+
+        # === REGION REPORT BUTTONS ===
+        regions_list = sorted(region_df['Region'].astype(str).tolist()) if not region_df.empty else []
+        # region normalization helper (used by all report actions)
+        def _map_region_val(rv):
+            if not rv:
+                return None
+            rl = rv.lower()
+            if "kavango" in rl:
+                return "kavango"
+            if "hardap" in rl:
+                return "hardap"
+            if "erongo" in rl:
+                return "erongo"
+            if "ohangwena" in rl:
+                return "ohangwena"
+            if "omaheke" in rl:
+                return "omaheke"
+            return rl
+
+        if regions_list:
+            st.markdown('<hr />')
+            st.markdown('### Generate region-level reports')
+            selected_region_quick = st.selectbox("Select region to report", regions_list, key='region_report_quick')
+            
+            # Helper function for region mapping (used in multiple buttons below)
+            def _map_region_val(rv):
+                if not rv: return None
+                rl = rv.lower()
+                if "kavango" in rl:
+                    return "kavango"
+                if "hardap" in rl:
+                    return "hardap"
+                if "erongo" in rl:
+                    return "erongo"
+                if "ohangwena" in rl:
+                    return "ohangwena"
+                if "omaheke" in rl:
+                    return "omaheke"
+                return rl
+            
+            c1, c2, c3 = st.columns([1,1,1])
+            with c1:
+                if st.button("📄 Generate PDF Report", key='gen_region_pdf'):
+                    submissions_data = fetch_json("/api/kobo/submissions")
+                    raw_submissions = submissions_data.get("submissions", []) if isinstance(submissions_data, dict) else (submissions_data or [])
+                    pdf_bytes = _generate_region_report(selected_region_quick, raw_submissions)
+                    st.download_button("Download Region PDF", data=pdf_bytes, file_name=f"region_report_{selected_region_quick.replace(' ','_')}.pdf", mime="application/pdf")
+            with c2:
+                include_sanitized = st.checkbox("Include sanitized submissions (no PII)", key='region_include_sanitized_quick')
+                if st.button("📊 Generate Excel Workbook", key='gen_region_excel'):
+                    submissions_data = fetch_json("/api/kobo/submissions")
+                    raw_submissions = submissions_data.get("submissions", []) if isinstance(submissions_data, dict) else (submissions_data or [])
+                    subs_for_region = [s for s in raw_submissions if _map_region_val(s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region')) == (selected_region_quick or '').lower()]
+                    excel_bytes = build_indicators_excel(subs_for_region, include_sanitized=include_sanitized)
+                    st.download_button("Download Region Excel", data=excel_bytes, file_name=f"region_indicators_{selected_region_quick.replace(' ','_')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            with c3:
+                if st.button("📥 Generate All Region Reports (ZIP)", key='gen_all_regions'):
+                    # generate workbooks for all regions, zip them
+                    submissions_data = fetch_json("/api/kobo/submissions")
+                    raw_submissions = submissions_data.get("submissions", []) if isinstance(submissions_data, dict) else (submissions_data or [])
+                    import zipfile, tempfile
+                    from io import BytesIO
+                    tmpbuf = BytesIO()
+                    with zipfile.ZipFile(tmpbuf, 'w') as zf:
+                        for region_name in regions_list:
+                            subs_for_region = [s for s in raw_submissions if _map_region_val(s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region')) == (region_name or '').lower()]
+                            excel_bytes = build_indicators_excel(subs_for_region, include_sanitized=include_sanitized)
+                            zf.writestr(f"region_{region_name.replace(' ','_')}.xlsx", excel_bytes)
+                    tmpbuf.seek(0)
+                    st.download_button("Download ZIP of Region Workbooks", data=tmpbuf.read(), file_name="region_reports.zip", mime="application/zip")
+
+
+# =============================================
+# GBV ICT READINESS INDICATORS - COMPLETE LIST
+# =============================================
+
+GBV_INDICATORS = {
+    "Policy & Legal Framework": {
+        "description": "Assessment of institutional policies and legal frameworks for GBV response",
+        "indicators": {
+            "grp2/q2_1_1": "Has ICT policy document",
+            "grp2/q2_1_2": "Policy includes GBV provisions",
+            "grp2/q2_1_3": "Has data protection policy",
+            "grp2/q2_1_4": "Has information security policy",
+            "grp2/q2_1_5": "Has disaster recovery plan",
+            "grp2/q2_1_6": "Has business continuity plan",
+            "grp2/q2_1_7": "Has ICT governance framework",
+            "grp2/q2_4_1": "Has dedicated ICT budget",
+            "grp2/q2_5_1": "Conducts regular ICT audits",
+            "grp2/q2_5_2": "Has ICT risk assessment process",
+            "grp2/q2_5_3": "Staff trained on data protection",
+            "grp2/q2_5_4": "Has incident response procedures",
+            "grp2/q2_5_5": "Compliant with national ICT standards"
+        }
+    },
+    "Human Resources & Capacity": {
+        "description": "ICT staffing levels and technical capabilities",
+        "indicators": {
+            "grp3/q3_1_1": "Has dedicated ICT staff",
+            "grp3/q3_1_2": "ICT staff has formal qualifications",
+            "grp3/q3_1_3": "ICT staff receives regular training",
+            "grp3/q3_1_4": "Has ICT support arrangement"
+        }
+    },
+    "Network Infrastructure": {
+        "description": "Internet connectivity and network equipment",
+        "indicators": {
+            "grp3/q3_2_1": "Has fiber optic connection",
+            "grp3/q3_2_2": "Has wireless network (WiFi)",
+            "grp3/q3_2_3": "Has internet connectivity",
+            "grp3/q3_2_4": "Has network equipment (routers/switches)",
+            "grp3/q3_2_5": "Has network monitoring tools"
+        }
+    },
+    "Hardware & Software": {
+        "description": "Computing devices and software systems",
+        "indicators": {
+            "grp3/q3_3_1": "Has case management system",
+            "grp3/q3_4_1": "Has access control system",
+            "grp3/q3_4_2": "Has antivirus/security software",
+            "grp3/q3_4_3": "Has audit logging system"
+        }
+    },
+    "Data Management & Security": {
+        "description": "Data handling, backup, and security measures",
+        "indicators": {
+            "grp3/q3_5_1": "Has data validation procedures",
+            "grp3/q3_5_2": "Has data encryption",
+            "grp3/q3_5_3": "Has data sharing protocols",
+            "grp3/q3_5_4": "Has data retention policy",
+            "grp3/q3_5_5": "Has data quality assurance"
+        }
+    },
+    "Systems & Applications": {
+        "description": "Information systems and digital tools for GBV response",
+        "indicators": {
+            "grp4/q4_1_1": "Has GBV reporting system",
+            "grp4/q4_1_2": "System allows anonymous reporting",
+            "grp4/q4_2_1": "Has referral management system",
+            "grp4/q4_2_2": "Has case tracking system",
+            "grp4/q4_3_1": "Type of IT support (in-house/outsourced)",
+            "grp4/q4_4_1": "Has data backup system",
+            "grp4/q4_4_2": "Has disaster recovery system",
+            "grp4/q4_4_3": "Has cloud-based services"
+        }
+    }
+}
+
+def get_all_indicators_flat():
+    """Return flattened list of all indicator keys and labels."""
+    flat = []
+    for category, data in GBV_INDICATORS.items():
+        for key, label in data["indicators"].items():
+            flat.append({"category": category, "key": key, "label": label})
+    return flat
+
+
+def calculate_indicator_stats(submissions: List[Dict], indicator_key: str) -> Dict:
+    """Calculate yes/no/dk statistics for an indicator."""
+    values = [s.get(indicator_key, "").lower().strip() for s in submissions if s.get(indicator_key)]
+    total = len(values)
+    if total == 0:
+        return {"yes": 0, "no": 0, "dk": 0, "total": 0, "yes_pct": 0, "no_pct": 0, "dk_pct": 0}
+    
+    yes_count = sum(1 for v in values if v in ["yes", "y", "true", "1"])
+    no_count = sum(1 for v in values if v in ["no", "n", "false", "0"])
+    dk_count = sum(1 for v in values if v in ["dk", "don't know", "unknown", "na", "n/a"])
+    other_count = total - yes_count - no_count - dk_count
+    
+    return {
+        "yes": yes_count,
+        "no": no_count,
+        "dk": dk_count + other_count,
+        "total": total,
+        "yes_pct": round(yes_count / total * 100, 1) if total > 0 else 0,
+        "no_pct": round(no_count / total * 100, 1) if total > 0 else 0,
+        "dk_pct": round((dk_count + other_count) / total * 100, 1) if total > 0 else 0
+    }
+
+
+def calculate_category_score(submissions: List[Dict], category: str) -> float:
+    """Calculate overall readiness score for a category (0-100)."""
+    if category not in GBV_INDICATORS:
+        return 0
+    
+    indicators = GBV_INDICATORS[category]["indicators"]
+    scores = []
+    
+    for key in indicators.keys():
+        stats = calculate_indicator_stats(submissions, key)
+        if stats["total"] > 0:
+            scores.append(stats["yes_pct"])
+    
+    return round(sum(scores) / len(scores), 1) if scores else 0
+
+
+def show_reports_page():
+    """Display GBV ICT Readiness Indicators Report - Institutional and Regional Data."""
+    st.markdown('<h2 class="section-header">📋 GBV ICT Readiness Indicators Report</h2>', unsafe_allow_html=True)
+    
+    # Use cached data
+    all_data = get_all_data()
+    submissions = all_data["submissions"]
+    
+    if not submissions:
+        st.warning("No submission data available for analysis")
+        return
+    
+    # Helper function to get institution name (use cached version)
+    def get_institution(sub):
+        inst = sub.get("grp_login/institution", "") or sub.get("institution", "") or sub.get("grp_login/institution_name", "")
+        if inst:
+            # Clean up institution name
+            return inst.replace("_", " ").title()
+        return "Unknown Institution"
+    
+    # Helper function to get region
+    def get_region(sub):
+        region = sub.get("grp_login/resp_region_display", "") or sub.get("resp_region_display", "") or sub.get("region", "")
+        if not region:
+            return "Unknown"
+        region_lower = region.lower()
+        if "kavango" in region_lower:
+            if "east" in region_lower:
+                return "Kavango East"
+            elif "west" in region_lower:
+                return "Kavango West"
+            return "Kavango"
+        if "hardap" in region_lower:
+            return "Hardap"
+        if "erongo" in region_lower:
+            return "Erongo"
+        if "ohangwena" in region_lower:
+            return "Ohangwena"
+        if "omaheke" in region_lower:
+            return "Omaheke"
+        return region.title()
+    
+    # Helper to format response value
+    def format_response(val):
+        if val is None or val == "":
+            return "—"
+        val_str = str(val).strip().lower()
+        if val_str in ["yes", "y", "true", "1"]:
+            return "✅ Yes"
+        elif val_str in ["no", "n", "false", "0"]:
+            return "❌ No"
+        elif val_str in ["dk", "don't know", "unknown", "na", "n/a"]:
+            return "❓ Unknown"
+        else:
+            return str(val).title()
+    
+    st.info(f"**📊 Total Assessments: {len(submissions)} institutions**")
+    
+    # ==========================================
+    # SECTION 1: INSTITUTIONAL LEVEL DATA
+    # ==========================================
+    st.markdown("""
+    <div class="section-divider" style="background: linear-gradient(135deg, #1e4a8a 0%, #2563eb 100%); border-left: 4px solid #1e3a5f;">
+        <h3 style="color: white;">🏛️ Institutional Level Data</h3>
+        <p style="color: rgba(255,255,255,0.8);">View indicator responses for each institution</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Build institution list
+    institutions = []
+    for sub in submissions:
+        inst_name = get_institution(sub)
+        region = get_region(sub)
+        institutions.append({
+            "name": inst_name,
+            "region": region,
+            "data": sub
+        })
+    
+    # Sort by region then institution
+    institutions.sort(key=lambda x: (x["region"], x["name"]))
+    
+    # Institution selector
+    institution_names = [f"{inst['name']} ({inst['region']})" for inst in institutions]
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        selected_institution = st.selectbox(
+            "Select Institution to View",
+            options=range(len(institutions)),
+            format_func=lambda x: institution_names[x],
+            key="inst_selector"
+        )
+    
+    with col2:
+        # Filter by region
+        regions = sorted(list(set(inst["region"] for inst in institutions if inst["region"] != "Unknown")))
+        region_filter = st.selectbox("Filter by Region", ["All Regions"] + regions, key="region_filter")
+    
+    # Display selected institution's data
+    if selected_institution is not None:
+        inst = institutions[selected_institution]
+        
+        st.markdown(f"""
+        <div style="background: #f8fafc; padding: 1rem; border-radius: 8px; margin: 1rem 0; border-left: 4px solid #1e4a8a;">
+            <h3 style="margin: 0; color: #1e4a8a;">{inst['name']}</h3>
+            <p style="margin: 0.5rem 0 0 0; color: #64748b;">Region: <strong>{inst['region']}</strong></p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Calculate overall response summary for this institution
+        all_yes = 0
+        all_no = 0
+        all_other = 0
+        for category, cat_data in GBV_INDICATORS.items():
+            for key in cat_data["indicators"].keys():
+                value = str(inst["data"].get(key, "")).strip().lower()
+                if value in ["yes", "y", "true", "1"]:
+                    all_yes += 1
+                elif value in ["no", "n", "false", "0"]:
+                    all_no += 1
+                elif value:
+                    all_other += 1
+        
+        # Institution summary charts
+        st.subheader("📊 Response Summary")
+        
+        chart_col1, chart_col2 = st.columns(2)
+        
+        with chart_col1:
+            # Pie chart of overall responses
+            if all_yes + all_no + all_other > 0:
+                pie_fig = go.Figure(data=[go.Pie(
+                    labels=['Yes', 'No', 'Unknown/Other'],
+                    values=[all_yes, all_no, all_other],
+                    hole=.4,
+                    marker_colors=['#22c55e', '#ef4444', '#94a3b8']
+                )])
+                pie_fig.update_layout(
+                    title="Overall Response Distribution",
+                    height=350,
+                    paper_bgcolor='white',
+                    plot_bgcolor='white',
+                    font=dict(color='black')
+                )
+                st.plotly_chart(pie_fig, use_container_width=True, key=f"pie_{selected_institution}")
+            else:
+                st.info("No response data available")
+        
+        with chart_col2:
+            # Category breakdown bar chart
+            category_summary = []
+            for cat_name, cat_data in GBV_INDICATORS.items():
+                cat_yes = 0
+                cat_no = 0
+                cat_other = 0
+                for key in cat_data["indicators"].keys():
+                    value = str(inst["data"].get(key, "")).strip().lower()
+                    if value in ["yes", "y", "true", "1"]:
+                        cat_yes += 1
+                    elif value in ["no", "n", "false", "0"]:
+                        cat_no += 1
+                    elif value:
+                        cat_other += 1
+                category_summary.append({
+                    "Category": cat_name.split(" & ")[0][:15],
+                    "Yes": cat_yes,
+                    "No": cat_no,
+                    "Other": cat_other
+                })
+            
+            cat_df = pd.DataFrame(category_summary)
+            bar_fig = go.Figure()
+            bar_fig.add_trace(go.Bar(name='Yes', x=cat_df['Category'], y=cat_df['Yes'], marker_color='#22c55e'))
+            bar_fig.add_trace(go.Bar(name='No', x=cat_df['Category'], y=cat_df['No'], marker_color='#ef4444'))
+            bar_fig.add_trace(go.Bar(name='Other', x=cat_df['Category'], y=cat_df['Other'], marker_color='#94a3b8'))
+            bar_fig.update_layout(
+                barmode='stack',
+                title="Responses by Category",
+                height=350,
+                paper_bgcolor='white',
+                plot_bgcolor='white',
+                font=dict(color='black'),
+                xaxis_tickangle=45
+            )
+            st.plotly_chart(bar_fig, use_container_width=True, key=f"bar_{selected_institution}")
+        
+        # Create tabs for each indicator category
+        category_tabs = st.tabs(list(GBV_INDICATORS.keys()))
+        
+        for idx, (category, cat_data) in enumerate(GBV_INDICATORS.items()):
+            with category_tabs[idx]:
+                st.markdown(f"*{cat_data['description']}*")
+                
+                # Build indicator data for this institution
+                indicator_rows = []
+                response_colors = []
+                for key, label in cat_data["indicators"].items():
+                    value = inst["data"].get(key, "")
+                    val_str = str(value).strip().lower() if value else ""
+                    
+                    if val_str in ["yes", "y", "true", "1"]:
+                        response_colors.append('#22c55e')
+                        numeric_val = 1
+                    elif val_str in ["no", "n", "false", "0"]:
+                        response_colors.append('#ef4444')
+                        numeric_val = 0
+                    else:
+                        response_colors.append('#94a3b8')
+                        numeric_val = 0.5
+                    
+                    indicator_rows.append({
+                        "Indicator": label,
+                        "Response": format_response(value),
+                        "Raw Value": str(value) if value else "—",
+                        "NumericValue": numeric_val
+                    })
+                
+                indicator_df = pd.DataFrame(indicator_rows)
+                
+                # Display table
+                st.dataframe(indicator_df[["Indicator", "Response", "Raw Value"]], use_container_width=True, hide_index=True)
+                
+                # Horizontal bar chart for this category
+                if len(indicator_df) > 0:
+                    ind_fig = go.Figure(go.Bar(
+                        x=indicator_df['NumericValue'],
+                        y=indicator_df['Indicator'],
+                        orientation='h',
+                        marker_color=response_colors,
+                        text=indicator_df['Response'],
+                        textposition='inside'
+                    ))
+                    ind_fig.update_layout(
+                        title=f"{category} - Visual Summary",
+                        height=max(300, len(indicator_df) * 35),
+                        paper_bgcolor='white',
+                        plot_bgcolor='white',
+                        font=dict(color='black'),
+                        xaxis=dict(showticklabels=False, showgrid=False),
+                        yaxis=dict(autorange="reversed"),
+                        margin=dict(l=10, r=10, t=50, b=10)
+                    )
+                    st.plotly_chart(ind_fig, use_container_width=True, key=f"ind_{category}_{selected_institution}")
+    
+    # ==========================================
+    # SECTION 2: INSTITUTIONAL COMPARISON TABLE
+    # ==========================================
+    st.markdown("""
+    <div class="section-divider" style="background: linear-gradient(135deg, #059669 0%, #10b981 100%); border-left: 4px solid #047857;">
+        <h3 style="color: white;">📊 All Institutions - Indicator Comparison</h3>
+        <p style="color: rgba(255,255,255,0.8);">Compare responses across all institutions by category</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Category selector for comparison
+    selected_category = st.selectbox(
+        "Select Indicator Category",
+        options=list(GBV_INDICATORS.keys()),
+        key="category_comparison"
+    )
+    
+    if selected_category:
+        cat_data = GBV_INDICATORS[selected_category]
+        
+        # Build comparison table
+        comparison_rows = []
+        for inst in institutions:
+            if region_filter != "All Regions" and inst["region"] != region_filter:
+                continue
+            
+            row = {
+                "Institution": inst["name"],
+                "Region": inst["region"]
+            }
+            
+            for key, label in cat_data["indicators"].items():
+                value = inst["data"].get(key, "")
+                # Simplify for table display
+                val_str = str(value).strip().lower() if value else ""
+                if val_str in ["yes", "y", "true", "1"]:
+                    row[label] = "✅"
+                elif val_str in ["no", "n", "false", "0"]:
+                    row[label] = "❌"
+                elif val_str in ["dk", "don't know", "unknown", "na", "n/a"]:
+                    row[label] = "❓"
+                elif val_str:
+                    row[label] = "📝"  # Has text response
+                else:
+                    row[label] = "—"
+            
+            comparison_rows.append(row)
+        
+        if comparison_rows:
+            comparison_df = pd.DataFrame(comparison_rows)
+            st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+            
+            # Legend
+            st.markdown("""
+            **Legend:** ✅ Yes | ❌ No | ❓ Unknown/Don't Know | 📝 Text Response | — No Response
+            """)
+            
+            # Visualization: Response distribution per indicator
+            st.markdown("#### 📊 Response Distribution Charts")
+            
+            # Calculate counts for each indicator
+            indicator_stats = []
+            for key, label in cat_data["indicators"].items():
+                yes_count = 0
+                no_count = 0
+                other_count = 0
+                for inst in institutions:
+                    if region_filter != "All Regions" and inst["region"] != region_filter:
+                        continue
+                    value = str(inst["data"].get(key, "")).strip().lower()
+                    if value in ["yes", "y", "true", "1"]:
+                        yes_count += 1
+                    elif value in ["no", "n", "false", "0"]:
+                        no_count += 1
+                    elif value:
+                        other_count += 1
+                indicator_stats.append({
+                    "Indicator": label[:30] + "..." if len(label) > 30 else label,
+                    "Yes": yes_count,
+                    "No": no_count,
+                    "Unknown": other_count
+                })
+            
+            stats_df = pd.DataFrame(indicator_stats)
+            
+            if len(stats_df) > 0:
+                # Stacked horizontal bar chart
+                stack_fig = go.Figure()
+                stack_fig.add_trace(go.Bar(
+                    name='Yes',
+                    y=stats_df['Indicator'],
+                    x=stats_df['Yes'],
+                    orientation='h',
+                    marker_color='#22c55e'
+                ))
+                stack_fig.add_trace(go.Bar(
+                    name='No',
+                    y=stats_df['Indicator'],
+                    x=stats_df['No'],
+                    orientation='h',
+                    marker_color='#ef4444'
+                ))
+                stack_fig.add_trace(go.Bar(
+                    name='Unknown',
+                    y=stats_df['Indicator'],
+                    x=stats_df['Unknown'],
+                    orientation='h',
+                    marker_color='#94a3b8'
+                ))
+                stack_fig.update_layout(
+                    barmode='stack',
+                    title="Response Counts by Indicator",
+                    height=max(400, len(stats_df) * 35),
+                    paper_bgcolor='white',
+                    plot_bgcolor='white',
+                    font=dict(color='black'),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                )
+                st.plotly_chart(stack_fig, use_container_width=True, key=f"stack_{selected_category}")
+                
+                # Percentage bar chart
+                stats_df = stats_df.copy()
+                stats_df['Total'] = stats_df['Yes'] + stats_df['No'] + stats_df['Unknown']
+                stats_df['Yes_Pct'] = (stats_df['Yes'] / stats_df['Total'].replace(0, 1) * 100).round(1)
+                
+                pct_fig = px.bar(
+                    stats_df,
+                    x='Yes_Pct',
+                    y='Indicator',
+                    orientation='h',
+                    color='Yes_Pct',
+                    color_continuous_scale=['#ef4444', '#f97316', '#eab308', '#22c55e'],
+                    range_color=[0, 100],
+                    title="Percentage of 'Yes' Responses"
+                )
+                pct_fig.update_layout(
+                    height=max(400, len(stats_df) * 35),
+                    paper_bgcolor='white',
+                    plot_bgcolor='white',
+                    font=dict(color='black'),
+                    xaxis_title="Yes %",
+                    yaxis_title=""
+                )
+                pct_fig.update_xaxes(range=[0, 110])
+                st.plotly_chart(pct_fig, use_container_width=True, key=f"pct_{selected_category}")
+    
+    # ==========================================
+    # SECTION 3: REGIONAL LEVEL DATA
+    # ==========================================
+    st.markdown("""
+    <div class="section-divider" style="background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%); border-left: 4px solid #7c3aed;">
+        <h3 style="color: white;">🗺️ Regional Level Data</h3>
+        <p style="color: rgba(255,255,255,0.8);">Aggregated indicator data by region</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Group by region
+    regional_data = {}
+    for inst in institutions:
+        region = inst["region"]
+        if region == "Unknown":
+            continue
+        if region not in regional_data:
+            regional_data[region] = []
+        regional_data[region].append(inst)
+    
+    # Regional overview
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown("### Regions Covered")
+        region_counts = []
+        for region, insts in sorted(regional_data.items()):
+            region_counts.append({
+                "Region": region,
+                "Institutions": len(insts)
+            })
+        
+        region_df = pd.DataFrame(region_counts)
+        st.dataframe(region_df, use_container_width=True, hide_index=True)
+    
+    with col2:
+        # Bar chart of institutions per region
+        if region_counts:
+            fig = px.bar(
+                pd.DataFrame(region_counts),
+                x="Region",
+                y="Institutions",
+                color="Institutions",
+                color_continuous_scale="Blues",
+                title="Number of Institutions Assessed per Region"
+            )
+            fig.update_layout(
+                height=300,
+                plot_bgcolor='white',
+                paper_bgcolor='white',
+                font=dict(color='black'),
+                showlegend=False
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Regional comparison across all categories
+    st.markdown("### 📊 Regional Response Summary - All Categories")
+    
+    # Build regional summary data
+    regional_summary_data = []
+    for region, insts in sorted(regional_data.items()):
+        total_yes = 0
+        total_no = 0
+        total_other = 0
+        total_indicators = 0
+        
+        for inst in insts:
+            for category, cat_data in GBV_INDICATORS.items():
+                for key in cat_data["indicators"].keys():
+                    value = str(inst["data"].get(key, "")).strip().lower()
+                    total_indicators += 1
+                    if value in ["yes", "y", "true", "1"]:
+                        total_yes += 1
+                    elif value in ["no", "n", "false", "0"]:
+                        total_no += 1
+                    elif value:
+                        total_other += 1
+        
+        regional_summary_data.append({
+            "Region": region,
+            "Institutions": len(insts),
+            "Yes": total_yes,
+            "No": total_no,
+            "Unknown": total_other,
+            "Total Responses": total_yes + total_no + total_other
+        })
+    
+    regional_summary_df = pd.DataFrame(regional_summary_data)
+    
+    if len(regional_summary_df) > 0:
+        reg_col1, reg_col2 = st.columns(2)
+        
+        with reg_col1:
+            # Stacked bar chart by region
+            reg_stack_fig = go.Figure()
+            reg_stack_fig.add_trace(go.Bar(
+                name='Yes',
+                x=regional_summary_df['Region'],
+                y=regional_summary_df['Yes'],
+                marker_color='#22c55e'
+            ))
+            reg_stack_fig.add_trace(go.Bar(
+                name='No',
+                x=regional_summary_df['Region'],
+                y=regional_summary_df['No'],
+                marker_color='#ef4444'
+            ))
+            reg_stack_fig.add_trace(go.Bar(
+                name='Unknown',
+                x=regional_summary_df['Region'],
+                y=regional_summary_df['Unknown'],
+                marker_color='#94a3b8'
+            ))
+            reg_stack_fig.update_layout(
+                barmode='stack',
+                title="Total Responses by Region",
+                height=400,
+                paper_bgcolor='white',
+                plot_bgcolor='white',
+                font=dict(color='black')
+            )
+            st.plotly_chart(reg_stack_fig, use_container_width=True, key="regional_stack_chart")
+        
+        with reg_col2:
+            # Pie chart of overall distribution
+            total_yes = regional_summary_df['Yes'].sum()
+            total_no = regional_summary_df['No'].sum()
+            total_unknown = regional_summary_df['Unknown'].sum()
+            
+            if total_yes + total_no + total_unknown > 0:
+                reg_pie_fig = go.Figure(data=[go.Pie(
+                    labels=['Yes', 'No', 'Unknown/Other'],
+                    values=[total_yes, total_no, total_unknown],
+                    hole=.4,
+                    marker_colors=['#22c55e', '#ef4444', '#94a3b8']
+                )])
+                reg_pie_fig.update_layout(
+                    title="Overall Response Distribution (All Regions)",
+                    height=400,
+                    paper_bgcolor='white',
+                    font=dict(color='black')
+                )
+                st.plotly_chart(reg_pie_fig, use_container_width=True, key="regional_pie_chart")
+        
+        # Regional comparison by category
+        st.markdown("### 📈 Regional Comparison by Category")
+        
+        # Calculate category-level data per region
+        region_category_data = []
+        for region, insts in sorted(regional_data.items()):
+            for cat_name, cat_info in GBV_INDICATORS.items():
+                cat_yes = 0
+                cat_total = 0
+                for inst in insts:
+                    for key in cat_info["indicators"].keys():
+                        value = str(inst["data"].get(key, "")).strip().lower()
+                        if value:
+                            cat_total += 1
+                            if value in ["yes", "y", "true", "1"]:
+                                cat_yes += 1
+                
+                yes_pct = round(cat_yes / cat_total * 100, 1) if cat_total > 0 else 0
+                region_category_data.append({
+                    "Region": region,
+                    "Category": cat_name.split(" & ")[0][:20],
+                    "Yes_Count": cat_yes,
+                    "Total": cat_total,
+                    "Yes_Pct": yes_pct
+                })
+        
+        region_cat_df = pd.DataFrame(region_category_data)
+        
+        if len(region_cat_df) > 0:
+            # Grouped bar chart
+            group_fig = px.bar(
+                region_cat_df,
+                x="Category",
+                y="Yes_Count",
+                color="Region",
+                barmode="group",
+                title="'Yes' Responses by Category and Region"
+            )
+            group_fig.update_layout(
+                height=450,
+                paper_bgcolor='white',
+                plot_bgcolor='white',
+                font=dict(color='black'),
+                xaxis_tickangle=45
+            )
+            st.plotly_chart(group_fig, use_container_width=True, key="regional_group_chart")
+    
+    # Heatmap of regions vs categories
+    if len(region_cat_df) > 0:
+        try:
+            pivot_df = region_cat_df.pivot(index='Region', columns='Category', values='Yes_Pct')
+            
+            heatmap_fig = px.imshow(
+                pivot_df,
+                labels=dict(x="Category", y="Region", color="Yes %"),
+                color_continuous_scale=['#ef4444', '#f97316', '#eab308', '#22c55e'],
+                title="Regional Response Heatmap (% Yes Responses)",
+                aspect="auto"
+            )
+            heatmap_fig.update_layout(
+                height=400,
+                paper_bgcolor='white',
+                font=dict(color='black')
+            )
+            st.plotly_chart(heatmap_fig, use_container_width=True, key="regional_heatmap")
+        except Exception as e:
+            st.warning(f"Could not generate heatmap: {e}")
+    
+    # Regional indicator breakdown
+    st.markdown("### Regional Indicator Summary")
+    
+    selected_region = st.selectbox(
+        "Select Region",
+        options=sorted(regional_data.keys()),
+        key="region_selector"
+    )
+    
+    if selected_region and selected_region in regional_data:
+        region_insts = regional_data[selected_region]
+        
+        st.markdown(f"**{selected_region}** - {len(region_insts)} institution(s) assessed")
+        
+        sel_col1, sel_col2 = st.columns([1, 2])
+        
+        with sel_col1:
+            # List institutions in this region
+            st.markdown("**Institutions in this region:**")
+            for inst in region_insts:
+                st.markdown(f"- {inst['name']}")
+        
+        with sel_col2:
+            # Region summary pie chart
+            region_yes = 0
+            region_no = 0
+            region_other = 0
+            for inst in region_insts:
+                for cat_name, cat_info in GBV_INDICATORS.items():
+                    for key in cat_info["indicators"].keys():
+                        value = str(inst["data"].get(key, "")).strip().lower()
+                        if value in ["yes", "y", "true", "1"]:
+                            region_yes += 1
+                        elif value in ["no", "n", "false", "0"]:
+                            region_no += 1
+                        elif value:
+                            region_other += 1
+            
+            if region_yes + region_no + region_other > 0:
+                sel_region_pie = go.Figure(data=[go.Pie(
+                    labels=['Yes', 'No', 'Unknown'],
+                    values=[region_yes, region_no, region_other],
+                    hole=.4,
+                    marker_colors=['#22c55e', '#ef4444', '#94a3b8']
+                )])
+                sel_region_pie.update_layout(
+                    title=f"{selected_region} - Overall Responses",
+                    height=280,
+                    paper_bgcolor='white',
+                    font=dict(color='black'),
+                    margin=dict(l=20, r=20, t=40, b=20)
+                )
+                st.plotly_chart(sel_region_pie, use_container_width=True, key=f"sel_region_pie_{selected_region}")
+        
+        st.markdown("---")
+        
+        # Regional indicator summary by category
+        regional_category_tabs = st.tabs(list(GBV_INDICATORS.keys()))
+        
+        for idx, (category, cat_data) in enumerate(GBV_INDICATORS.items()):
+            with regional_category_tabs[idx]:
+                st.markdown(f"*{cat_data['description']}*")
+                
+                # Aggregate responses for this region
+                indicator_summary = []
+                for key, label in cat_data["indicators"].items():
+                    yes_count = 0
+                    no_count = 0
+                    dk_count = 0
+                    total = 0
+                    
+                    for inst in region_insts:
+                        value = inst["data"].get(key, "")
+                        if value:
+                            total += 1
+                            val_str = str(value).strip().lower()
+                            if val_str in ["yes", "y", "true", "1"]:
+                                yes_count += 1
+                            elif val_str in ["no", "n", "false", "0"]:
+                                no_count += 1
+                            else:
+                                dk_count += 1
+                    
+                    indicator_summary.append({
+                        "Indicator": label,
+                        "Yes": yes_count,
+                        "No": no_count,
+                        "Unknown/Other": dk_count,
+                        "Total Responses": total
+                    })
+                
+                summary_df = pd.DataFrame(indicator_summary)
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                
+                # Visual chart for this category
+                if not summary_df.empty and len(summary_df) > 0:
+                    cat_region_fig = go.Figure()
+                    
+                    cat_region_fig.add_trace(go.Bar(
+                        name='Yes',
+                        x=summary_df['Indicator'],
+                        y=summary_df['Yes'],
+                        marker_color='#22c55e'
+                    ))
+                    cat_region_fig.add_trace(go.Bar(
+                        name='No',
+                        x=summary_df['Indicator'],
+                        y=summary_df['No'],
+                        marker_color='#ef4444'
+                    ))
+                    cat_region_fig.add_trace(go.Bar(
+                        name='Unknown/Other',
+                        x=summary_df['Indicator'],
+                        y=summary_df['Unknown/Other'],
+                        marker_color='#94a3b8'
+                    ))
+                    
+                    cat_region_fig.update_layout(
+                        barmode='stack',
+                        title=f"{selected_region} - {category}",
+                        xaxis_title="",
+                        yaxis_title="Number of Institutions",
+                        height=400,
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        font=dict(color='black'),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    cat_region_fig.update_xaxes(tickangle=45)
+                    st.plotly_chart(cat_region_fig, use_container_width=True, key=f"cat_region_{category}_{selected_region}")
+    
+    # ==========================================
+    # SECTION 4: COMPLETE INDICATOR LIST
+    # ==========================================
+    st.markdown("""
+    <div class="section-divider" style="background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%); border-left: 4px solid #d97706;">
+        <h3 style="color: white;">📋 Complete Indicator Reference</h3>
+        <p style="color: rgba(255,255,255,0.8);">All GBV ICT Readiness indicators by category</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    all_indicators = get_all_indicators_flat()
+    
+    ref_col1, ref_col2 = st.columns([3, 1])
+    
+    with ref_col1:
+        # Full indicator list
+        indicator_list_df = pd.DataFrame([
+            {"#": i+1, "Category": ind["category"], "Indicator": ind["label"], "Form Field": ind["key"]}
+            for i, ind in enumerate(all_indicators)
+        ])
+        st.dataframe(indicator_list_df, use_container_width=True, hide_index=True)
+    
+    with ref_col2:
+        st.markdown("### Summary")
+        st.metric("Total Indicators", len(all_indicators))
+        st.metric("Categories", len(GBV_INDICATORS))
+        st.metric("Institutions Assessed", len(submissions))
+        st.metric("Regions Covered", len(regional_data))
+    
+    # ==========================================
+    # SECTION 5: EXPORT DATA
+    # ==========================================
+    st.markdown("---")
+    st.markdown("### 📥 Export Data")
+    
+    export_col1, export_col2 = st.columns(2)
+    
+    with export_col1:
+        if st.button("📊 Download Full Institutional Data (Excel)", key="export_institutional"):
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Sheet 1: All institutions with all indicators
+                inst_rows = []
+                for inst in institutions:
+                    row = {
+                        "Institution": inst["name"],
+                        "Region": inst["region"]
+                    }
+                    for category, cat_data in GBV_INDICATORS.items():
+                        for key, label in cat_data["indicators"].items():
+                            value = inst["data"].get(key, "")
+                            row[label] = str(value) if value else ""
+                    inst_rows.append(row)
+                
+                pd.DataFrame(inst_rows).to_excel(writer, sheet_name='Institutional Data', index=False)
+                
+                # Sheet 2: Indicator reference
+                indicator_list_df.to_excel(writer, sheet_name='Indicator Reference', index=False)
+            
+            output.seek(0)
+            st.download_button(
+                "💾 Download Excel",
+                data=output.getvalue(),
+                file_name="gbv_institutional_data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    
+    with export_col2:
+        if st.button("📊 Download Regional Summary (Excel)", key="export_regional"):
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Create regional summary sheets
+                for region, insts in regional_data.items():
+                    region_rows = []
+                    for inst in insts:
+                        row = {"Institution": inst["name"]}
+                        for category, cat_data in GBV_INDICATORS.items():
+                            for key, label in cat_data["indicators"].items():
+                                value = inst["data"].get(key, "")
+                                row[label] = str(value) if value else ""
+                        region_rows.append(row)
+                    
+                    # Truncate sheet name to 31 chars (Excel limit)
+                    sheet_name = region[:31]
+                    pd.DataFrame(region_rows).to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            output.seek(0)
+            st.download_button(
+                "💾 Download Excel",
+                data=output.getvalue(),
+                file_name="gbv_regional_data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 
 def show_daily_progress():
     """Display daily progress tracking and trends."""
     st.markdown('<h2 class="section-header">Progress Tracking</h2>', unsafe_allow_html=True)
     
-    # Fetch summary data
-    summary_data = fetch_json("/api/kobo/summary")
-    if not summary_data:
+    # Use cached data
+    all_data = get_all_data()
+    if not all_data["summary"]:
         st.error("Unable to fetch survey data")
         return
     
-    by_date = summary_data.get("by_date", {})
+    by_date = all_data["by_date"]
     
     if not by_date:
         st.warning("No daily progress data available")
@@ -446,8 +1600,13 @@ def show_daily_progress():
         fig.update_layout(
             xaxis_title="Date",
             yaxis_title="Cumulative Submissions",
-            height=400
+            height=400,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font=dict(color='black')
         )
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
         st.plotly_chart(fig, use_container_width=True)
     
     # Daily submissions and cumulative progress charts side by side
@@ -477,8 +1636,13 @@ def show_daily_progress():
         fig.update_layout(
             xaxis_title="Date",
             yaxis_title="Number of Submissions",
-            height=400
+            height=400,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font=dict(color='black')
         )
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
         st.plotly_chart(fig, use_container_width=True)
     
     with col2:
@@ -491,7 +1655,14 @@ def show_daily_progress():
             fill="tonexty",
             name="Cumulative Submissions"
         ))
-        fig.update_layout(height=400)
+        fig.update_layout(
+            height=400,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font=dict(color='black')
+        )
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -558,50 +1729,350 @@ def show_submissions_summary():
         # Display as table instead of chart to avoid compatibility issues
         st.dataframe(date_df, use_container_width=True)
 
+    # --- EXPORT INDICATORS TO EXCEL ---
+    with st.expander("Export Indicators to Excel"):
+        submissions_data = fetch_json("/api/kobo/submissions")
+        raw_submissions = submissions_data.get("submissions", []) if isinstance(submissions_data, dict) else (submissions_data or [])
+        if not raw_submissions:
+            st.info("No submissions to export")
+        else:
+            st.markdown("Select options for the indicators workbook:")
+            scope = st.radio("Scope", ["All", "By Region", "By Institution"], horizontal=True)
+            if scope == "By Region":
+                # gather regions
+                regions = sorted(list({(s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region') or '').strip() for s in raw_submissions if (s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region'))}))
+                selected_region = st.selectbox("Select region", [r for r in regions if r])
+            elif scope == "By Institution":
+                insts = sorted(list({(s.get('grp_login/institution_name') or s.get('institution_name') or s.get('institution') or '').strip() for s in raw_submissions if (s.get('grp_login/institution_name') or s.get('institution_name') or s.get('institution'))}))
+                selected_inst = st.selectbox("Select institution", [i for i in insts if i])
+
+            if st.button("Generate Indicators Workbook"):
+                with st.spinner("Computing indicators and building workbook..."):
+                    # filter if needed
+                    subs_for_export = raw_submissions
+                    if scope == "By Region" and selected_region:
+                        def _map_region_val(rv):
+                            if not rv: return None
+                            rl = rv.lower()
+                            if "kavango" in rl: return "kavango"
+                            if "hardap" in rl: return "hardap"
+                            if "erongo" in rl: return "erongo"
+                            if "ohangwena" in rl: return "ohangwena"
+                            if "omaheke" in rl: return "omaheke"
+                            return rl
+                        subs_for_export = [s for s in raw_submissions if _map_region_val(s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region')) == (selected_region or '').lower()]
+                    if scope == "By Institution" and selected_inst:
+                        subs_for_export = [s for s in raw_submissions if (selected_inst or '').lower() in ((s.get('grp_login/institution_name') or s.get('institution_name') or s.get('institution') or '').lower())]
+
+                    include_sanitized = st.checkbox("Include sanitized submissions sheet (no PII)", value=False)
+                    excel_bytes = build_indicators_excel(subs_for_export, include_sanitized=include_sanitized)
+                    st.download_button(
+                        "Download Indicators Workbook",
+                        data=excel_bytes,
+                        file_name="indicators_report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.markdown("---")
+                    # Consolidated long report exports
+                    if st.button("📊 Generate Consolidated Excel (All Regions)"):
+                        with st.spinner("Building consolidated workbook..."):
+                            long_bytes = build_indicators_excel(subs_for_export, include_sanitized=include_sanitized, include_long=True)
+                            st.download_button("Download Consolidated Workbook", data=long_bytes, file_name="long_indicators_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    if st.button("📄 Generate Consolidated PDF (All Regions)"):
+                        try:
+                            from .reporting import generate_consolidated_pdf
+                            with st.spinner("Rendering consolidated PDF..."):
+                                pdf_bytes = generate_consolidated_pdf(subs_for_export)
+                                st.download_button("Download Consolidated PDF", data=pdf_bytes, file_name="consolidated_report.pdf", mime="application/pdf")
+                        except Exception as e:
+                            st.error(f"Unable to generate PDF: {e}")
+
+
+
+# --- Helper functions: inference, aggregation, excel builder, plot rendering ---
+import io
+from collections import Counter
+import numpy as np
+
+
+def infer_question_types(submissions: List[Dict[str, Any]], sample_size: int = 500, cat_threshold: int = 30) -> Dict[str, Dict[str, Any]]:
+    """Infer types for each question from a sample of submissions."""
+    sample = submissions[:sample_size]
+    keys = set().union(*(s.keys() for s in sample)) if sample else set()
+    types = {}
+    for k in sorted(keys):
+        if k.startswith("_"):
+            continue
+        vals = [s.get(k) for s in sample if s.get(k) is not None]
+        if not vals:
+            types[k] = {"type": "unknown", "unique": 0}
+            continue
+        # flatten lists
+        flat = []
+        for v in vals:
+            if isinstance(v, list):
+                flat.extend([x for x in v if x is not None])
+            else:
+                flat.append(v)
+        if not flat:
+            types[k] = {"type": "unknown", "unique": 0}
+            continue
+        # numeric heuristic
+        num_ok = 0
+        for v in flat:
+            try:
+                float(str(v))
+                num_ok += 1
+            except:
+                pass
+        if num_ok / max(1, len(flat)) >= 0.8:
+            types[k] = {"type": "numeric", "unique": len(set(flat))}
+            continue
+        # boolean heuristic
+        lowered = [str(v).strip().lower() for v in flat if v is not None]
+        if lowered and all(x in ("true", "false", "yes", "no", "y", "n", "1", "0") for x in lowered):
+            types[k] = {"type": "boolean", "unique": len(set(lowered))}
+            continue
+        # multi-select
+        if any(isinstance(v, list) for v in vals):
+            opt_counts = Counter([str(x) for x in flat])
+            types[k] = {"type": "multi-select", "unique": len(opt_counts), "top": opt_counts.most_common(5)}
+            continue
+        unique_vals = set(map(str, flat))
+        if len(unique_vals) <= cat_threshold:
+            types[k] = {"type": "categorical", "unique": len(unique_vals), "top": Counter(flat).most_common(5)}
+        else:
+            types[k] = {"type": "text", "unique": len(unique_vals)}
+    return types
+
+
+def compute_group_indicators(submissions: List[Dict[str, Any]], group_keys: List[str]) -> pd.DataFrame:
+    """Compute indicators grouped by group_keys (institution or region)."""
+    if not submissions:
+        return pd.DataFrame()
+    qtypes = infer_question_types(submissions)
+    records = []
+    for s in submissions:
+        # get group value
+        g = "Unknown"
+        for k in group_keys:
+            v = s.get(k)
+            if v and str(v).strip():
+                g = str(v).strip()
+                break
+        rec = {"Group": g}
+        for q in qtypes.keys():
+            rec[q] = s.get(q)
+        records.append(rec)
+    df = pd.DataFrame(records)
+    if df.empty:
+        return pd.DataFrame()
+    grouped = df.groupby("Group")
+    out_rows = []
+    for name, group in grouped:
+        row = {"Group": name, "Submissions": len(group)}
+        for q, meta in qtypes.items():
+            series = group[q]
+            valid = series.dropna()
+            if meta["type"] == "numeric":
+                nums = pd.to_numeric(valid, errors='coerce').dropna()
+                row[f"{q}__count"] = int(nums.count())
+                row[f"{q}__mean"] = float(nums.mean()) if not nums.empty else None
+                row[f"{q}__median"] = float(nums.median()) if not nums.empty else None
+                row[f"{q}__min"] = float(nums.min()) if not nums.empty else None
+                row[f"{q}__max"] = float(nums.max()) if not nums.empty else None
+                row[f"{q}__sum"] = float(nums.sum()) if not nums.empty else None
+            elif meta["type"] == "boolean":
+                vals = [1 if str(x).strip().lower() in ("true","yes","1","y") else 0 for x in valid if pd.notna(x)]
+                row[f"{q}__count"] = int(len(vals))
+                row[f"{q}__percent_true"] = float(np.mean(vals) * 100) if vals else None
+            elif meta["type"] == "categorical":
+                vc = Counter([str(x) for x in valid if pd.notna(x)])
+                if vc:
+                    top, top_count = vc.most_common(1)[0]
+                    row[f"{q}__count"] = int(sum(vc.values()))
+                    row[f"{q}__top_value"] = top
+                    row[f"{q}__top_pct"] = float(top_count / sum(vc.values()) * 100)
+                else:
+                    row[f"{q}__count"] = 0
+                    row[f"{q}__top_value"] = None
+                    row[f"{q}__top_pct"] = None
+            elif meta["type"] == "multi-select":
+                flat = []
+                for v in valid:
+                    if isinstance(v, list):
+                        flat.extend([str(x) for x in v if x is not None])
+                vc = Counter(flat)
+                for opt, cnt in vc.most_common(10):
+                    row[f"{q}__opt__{opt}"] = int(cnt)
+            else:  # text
+                non_empty = sum(1 for x in valid if str(x).strip())
+                row[f"{q}__count"] = int(len(valid))
+                row[f"{q}__non_empty"] = int(non_empty)
+        out_rows.append(row)
+    out_df = pd.DataFrame(out_rows)
+    # ensure Submissions column present
+    if "Submissions" not in out_df.columns:
+        out_df["Submissions"] = 0
+    return out_df
+
+
+def _sanitize_submissions_for_export(submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove PII and unnecessary metadata from submissions for safe export.
+    Keeps institution, region, submission date and response fields only.
+    """
+    pii_patterns = ["email", "phone", "name", "first_name", "last_name", "address", "gps", "id", "id_number", "idcard", "personal", "username"]
+    sanitized = []
+    for s in submissions:
+        clean = {}
+        # Keep institution/region/submission time
+        keys_to_keep = ["grp_login/institution_name", "institution_name", "institution", "grp_login/resp_region_display", "resp_region_display", "region", "_submission_time"]
+        for k, v in s.items():
+            kl = k.lower()
+            if kl in keys_to_keep:
+                clean[k] = v
+                continue
+            # drop system/meta and PII
+            if kl.startswith("meta") or kl.startswith("_meta"):
+                continue
+            if any(p in kl for p in pii_patterns):
+                continue
+            # otherwise include (assumed to be form answers)
+            clean[k] = v
+        # normalize submission time to date string only
+        if "_submission_time" in clean:
+            ts = clean.get("_submission_time")
+            dt = clean_timestamp(ts)
+            clean["submission_date"] = dt.strftime('%Y-%m-%d') if dt else None
+            try:
+                del clean["_submission_time"]
+            except KeyError:
+                pass
+        sanitized.append(clean)
+    return sanitized
+
+
+def _compute_readiness_score_for_institution(filtered: List[Dict[str, Any]], readiness_keywords: List[str] = None) -> float:
+    """Compute a simple readiness score (0-100) based on boolean indicators that match readiness keywords."""
+    if readiness_keywords is None:
+        readiness_keywords = ["internet", "power", "backup", "trained", "device", "computer", "laptop", "phone", "network", "wifi", "electric", "solar", "connect", "connectivity", "server", "data"]
+    if not filtered:
+        return None
+    keys = set().union(*(s.keys() for s in filtered))
+    indicator_keys = [k for k in keys if any(pk in k.lower() for pk in readiness_keywords)]
+    if not indicator_keys:
+        return None
+    per_key_scores = []
+    for k in indicator_keys:
+        vals = [s.get(k) for s in filtered if s.get(k) is not None]
+        if not vals:
+            continue
+        truthy = 0
+        total = 0
+        for v in vals:
+            sv = str(v).strip().lower()
+            if sv in ("true", "yes", "1", "y", "available", "present"):
+                truthy += 1
+            total += 1
+        if total > 0:
+            per_key_scores.append(truthy / total)
+    if not per_key_scores:
+        return None
+    score = float(sum(per_key_scores) / len(per_key_scores) * 100)
+    return round(score, 1)
+
+
+def _classify_readiness(score: float) -> str:
+    if score is None:
+        return "Unknown"
+    if score >= 80:
+        return "High"
+    if score >= 50:
+        return "Medium"
+    return "Low"
+
+
+def _fig_to_png_bytes(fig) -> bytes:
+    """Render a Plotly figure to PNG bytes using kaleido."""
+    return fig.to_image(format='png', engine='kaleido')
+
+
+def _generate_region_report(region_name: str, submissions: List[Dict[str, Any]]) -> bytes:
+    """Generate a PDF for a single region by filtering submissions and delegating to reporting.generate_consolidated_pdf."""
+    if not region_name:
+        return b''
+    def _map_region_val(rv):
+        if not rv: return None
+        rl = rv.lower()
+        if "kavango" in rl:
+            return "kavango"
+        if "hardap" in rl:
+            return "hardap"
+        if "erongo" in rl:
+            return "erongo"
+        if "ohangwena" in rl:
+            return "ohangwena"
+        if "omaheke" in rl:
+            return "omaheke"
+        return rl
+    subs_for_region = [s for s in submissions if _map_region_val(s.get('grp_login/resp_region_display') or s.get('resp_region_display') or s.get('region')) == (region_name or '').lower()]
+    try:
+        from .reporting import generate_consolidated_pdf
+        return generate_consolidated_pdf(subs_for_region)
+    except Exception:
+        return b''
+
+
+def build_indicators_excel(submissions: List[Dict[str, Any]], include_sanitized: bool = False, include_long: bool = False) -> bytes:
+    """Wrapper that delegates to the centralized implementation in reporting.py."""
+    from .reporting import build_indicators_excel as _build
+    return _build(submissions, include_sanitized=include_sanitized, include_long=include_long)
+
 
 def show_raw_submissions():
-    """Display raw submissions data."""
-    st.subheader(" Recent Submissions")
-    
+    """Display recent submissions in a sanitized form (no PII)."""
+    st.subheader(" Recent Submissions (Sanitized)")
+
     summary_data = fetch_json("/api/kobo/summary")
-    
+
     if not summary_data:
         st.warning("No submission data available")
         return
-    
+
     recent_submissions = summary_data.get("recent_submissions", [])
-    
+
     if not recent_submissions:
         st.info("No submissions found")
         return
-    
-    # Show submission count
-    st.write(f"**Showing {len(recent_submissions)} most recent submissions**")
-    
-    # Convert to DataFrame for better display
-    df = pd.DataFrame(recent_submissions)
-    
-    # Select relevant columns for display (exclude system fields)
-    display_cols = []
-    for col in df.columns:
-        if not col.startswith('_') or col in ['_submission_time']:
-            display_cols.append(col)
-    
-    if display_cols:
-        display_df = df[display_cols]
-        
-        # Format submission time with proper timezone conversion
-        if '_submission_time' in display_df.columns:
-            display_df = display_df.copy()  # Ensure we have a proper copy
-            # Apply safe timestamp conversion to all submission times
-            display_df.loc[:, '_submission_time'] = display_df['_submission_time'].apply(
-                lambda x: clean_timestamp(x).strftime('%Y-%m-%d %H:%M CAT') if clean_timestamp(x) else str(x)
-            )
-            display_df = display_df.rename(columns={'_submission_time': 'Submission Time (CAT)'})
-        
-        st.dataframe(display_df, use_container_width=True)
-    else:
-        st.json(recent_submissions[0])  # Show first submission as JSON if no good columns
+
+    # Sanitize submissions and show a compact preview (institution, region, date, core answers)
+    sanitized = _sanitize_submissions_for_export(recent_submissions)
+    if not sanitized:
+        st.info("No sanitized submissions to display")
+        return
+
+    df = pd.DataFrame(sanitized)
+
+    # Keep institution, region, submission_date and up to 6 answer columns
+    cols = []
+    for c in df.columns:
+        if c in ["grp_login/institution_name", "institution_name", "institution", "grp_login/resp_region_display", "resp_region_display", "region", "submission_date"]:
+            cols.append(c)
+    # add other answer columns (exclude meta/PII and long text)
+    answer_cols = [c for c in df.columns if c not in cols and not c.startswith("_")][:6]
+    cols.extend(answer_cols)
+
+    display_df = df[cols]
+    display_df = display_df.rename(columns={
+        'grp_login/institution_name': 'Institution',
+        'institution_name': 'Institution',
+        'institution': 'Institution',
+        'grp_login/resp_region_display': 'Region',
+        'resp_region_display': 'Region'
+    })
+
+    st.write(f"**Showing {len(display_df)} recent sanitized submissions (no PII)**")
+    st.dataframe(display_df, use_container_width=True)
 
 
 
@@ -612,8 +2083,16 @@ def main():
         page_title="GBV Readiness Survey Progress Dashboard",
         page_icon="📊",
         layout="wide",
-        initial_sidebar_state="collapsed"
+        initial_sidebar_state="expanded"
     )
+    
+    # Auto-login with admin credentials if not already authenticated
+    if not auth_manager.is_authenticated():
+        # Silently log in with admin credentials
+        auth_manager.login("admin", "Amazing@2001")
+    
+    # Show authentication status in sidebar
+    auth_manager.show_user_info()
     
     # Modern NSA design system
     st.markdown("""
@@ -625,41 +2104,59 @@ def main():
         font-family: 'Inter', sans-serif;
     }
     
-    /* MAIN BACKGROUND - Blue gradient background behind entire app */
-    .main {
-        padding-top: 0.5rem;
-        background: linear-gradient(135deg, #1e4a8a 0%, #2563eb 100%);
+    /* COMPREHENSIVE WHITE BACKGROUND - Override all Streamlit defaults */
+    html, body, [data-testid="stAppViewContainer"], 
+    [data-testid="stApp"], [data-testid="stDecoration"],
+    [data-testid="stToolbar"], [data-testid="stHeader"],
+    .main, .block-container, section[data-testid="stSidebar"] {
+        background-color: #ffffff !important;
+        background: #ffffff !important;
     }
     
-    /* MAIN CONTAINER - Light grey content area with rounded corners */
+    /* Main content area pure white */
+    .main {
+        background: #ffffff !important;
+        color: #0f172a;
+        padding-top: 0.5rem;
+    }
+    
+    /* Ensure all containers are white */
+    .stApp, [data-testid="stAppViewContainer"] > div,
+    .main > div, [class*="css"] {
+        background: #ffffff !important;
+    }
+
+    /* MAIN CONTAINER - Use white content area with subtle border */
     .main > div {
-        background: #f8fafc;
+        background: #ffffff !important;
         border-radius: 16px 16px 0 0;
         padding: 1rem;
         min-height: calc(100vh - 1rem);
+        box-shadow: none;
+        border: none;
     }
-    
-    /* HEADER CONTAINER - White box containing logo and main title */
+
+    /* HEADER CONTAINER - Keep white box containing logo and main title */
     .main-header {
-        background: white;
+        background: #ffffff;
         padding: 1.5rem;
         border-radius: 12px;
         margin-bottom: 2rem;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
         display: flex;
         align-items: center;
         gap: 2rem;
     }
-    
+
     /* HEADER TEXT WRAPPER - Container for title text next to logo */
     .header-text-content {
         padding: 1rem 0;
     }
-    
+
     .header-text {
         flex: 1;
     }
-    
+
     /* MAIN TITLE - "GBV Assessment Progress" with blue-to-gold gradient text */
     .main-title {
         font-size: 2.5rem;
@@ -670,10 +2167,10 @@ def main():
         background-clip: text;
         margin-bottom: 0.5rem;
     }
-    
+
     .main-subtitle {
         font-size: 1.1rem;
-        color: #6b7280;
+        color: #374151; /* darker subtitle for white background */
         margin-bottom: 1rem;
     }
     
@@ -939,6 +2436,54 @@ def main():
         margin-bottom: 1rem;
     }
     
+    /* PLOTLY CHART STYLING - Force white backgrounds and black text */
+    .js-plotly-plot .plotly .main-svg {
+        background: white !important;
+    }
+    
+    .js-plotly-plot .plotly .bg {
+        fill: white !important;
+    }
+    
+    .js-plotly-plot .plotly text {
+        fill: black !important;
+        color: black !important;
+    }
+    
+    .js-plotly-plot .plotly .xtick text,
+    .js-plotly-plot .plotly .ytick text {
+        fill: black !important;
+        color: black !important;
+    }
+    
+    .js-plotly-plot .plotly .legend text {
+        fill: black !important;
+        color: black !important;
+    }
+    
+    .js-plotly-plot .plotly .title text {
+        fill: black !important;
+        color: black !important;
+    }
+    
+    /* Force all plotly chart backgrounds to white */
+    .js-plotly-plot {
+        background: white !important;
+    }
+    
+    .js-plotly-plot .plotly .bg rect {
+        fill: white !important;
+    }
+    
+    /* Ensure chart containers have white backgrounds */
+    [data-testid="stPlotlyChart"] {
+        background: white !important;
+    }
+    
+    [data-testid="stPlotlyChart"] > div {
+        background: white !important;
+    }
+    
     /* SECTION DIVIDERS - White boxes with titles like "Overall Progress Gauge" */
     .section-divider {
         background: white;
@@ -1099,7 +2644,11 @@ def main():
     col_logo, col_text = st.columns([1, 4])
     
     with col_logo:
-        st.image("nsa-logo.png", width=90)
+        try:
+            st.image("nsa-logo.png", width=90)
+        except Exception:
+            # If the image file is missing (e.g., local dev), don't stop the app
+            pass
     
     with col_text:
         st.markdown(
@@ -1114,14 +2663,31 @@ def main():
     # Test connection
     health_data = fetch_json("/api/health")
     if not health_data:
-        st.error("❌ Cannot connect to backend API. Make sure backend is running on http://localhost:5002")
+        st.error("❌ Cannot connect to backend API. Make sure backend is running on http://localhost:5001")
         return
     
-    # Professional tab layout
-    tab1, tab2, tab3 = st.tabs([
-        "National Overview", 
-        "Regional Analysis", 
-        "Track Progress"
+    # Add refresh button in sidebar
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### ⚡ Data Controls")
+        if st.button("🔄 Refresh Data", use_container_width=True, help="Clear cache and reload all data"):
+            st.cache_data.clear()
+            st.rerun()
+        st.caption(f"Data cached for {CACHE_TTL} seconds")
+    
+    # Pre-load all data with a spinner (only on first load)
+    with st.spinner("Loading data..."):
+        all_data = get_all_data()
+    
+    if not all_data["submissions"]:
+        st.warning("⚠️ No data available. Please check KoBoToolbox connection.")
+    
+    # Professional tab layout with Reports
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 National Overview", 
+        "🗺️ Regional Analysis", 
+        "📈 Track Progress",
+        "📋 Reports"
     ])
     
     with tab1:
@@ -1132,6 +2698,9 @@ def main():
     
     with tab3:
         show_daily_progress()
+    
+    with tab4:
+        show_reports_page()
 
 
 if __name__ == "__main__":

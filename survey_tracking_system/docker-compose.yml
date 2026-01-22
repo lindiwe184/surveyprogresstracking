@@ -1,76 +1,74 @@
 version: '3.8'
 
 services:
-  gbv-backend:
-    build: .
-    container_name: gbv-backend
-    restart: unless-stopped
-    working_dir: /app/backend
-    command: gunicorn -w 4 -b 0.0.0.0:5002 --timeout 120 kobo_app:app
-    ports:
-      - "5002:5002"
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: gbv-postgres
     environment:
-      - FLASK_ENV=production
-    env_file:
-      - backend/.env
+      POSTGRES_USER: survey_user
+      POSTGRES_PASSWORD: survey_password
+      POSTGRES_DB: survey_tracking
     volumes:
-      - ./backend:/app/backend
-      - ./logs:/app/logs
-    networks:
-      - gbv-network
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema_v2.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5002/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-  gbv-frontend:
-    build: .
-    container_name: gbv-frontend
-    restart: unless-stopped
-    working_dir: /app/frontend
-    command: streamlit run kobo_dashboard.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
-    ports:
-      - "8501:8501"
-    environment:
-      - FRONTEND_API_BASE_URL=http://gbv-backend:5002
-    volumes:
-      - ./frontend:/app/frontend
-      - ./logs:/app/logs
+      test: ["CMD-SHELL", "pg_isready -U survey_user -d survey_tracking"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - gbv-network
+
+  # Application Dashboard
+  gbv-dashboard:
+    build: .
+    container_name: gbv-survey-dashboard
+    ports:
+      - "8501:8501"  # Streamlit frontend
+      - "5000:5000"  # Flask backend
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql+psycopg2://survey_user:survey_password@postgres:5432/survey_tracking
+    volumes:
+      - ./backend/.env:/app/backend/.env:ro
+      - ./logs:/var/log/gbv-dashboard
     depends_on:
-      gbv-backend:
+      postgres:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - gbv-network
 
+  # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
     container_name: gbv-nginx
-    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./ssl:/etc/ssl/certs:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - gbv-dashboard
+    restart: unless-stopped
     networks:
       - gbv-network
-    depends_on:
-      - gbv-backend
-      - gbv-frontend
 
 networks:
   gbv-network:
     driver: bridge
 
 volumes:
-  gbv-logs:
-    driver: local
+  logs:
+  postgres_data:
