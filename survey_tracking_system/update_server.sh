@@ -40,13 +40,29 @@ echo "📥 Pulling latest changes from GitHub..."
 git stash save "Auto-stash before update $(date +%Y%m%d_%H%M%S)"
 git pull origin main
 
-# 5. Update Python dependencies
+# 5. Create/update virtual environment and install dependencies
+echo "📦 Setting up Python virtual environment..."
+cd "$PROJECT_DIR"
+
+# Create venv if it doesn't exist
+if [ ! -d "venv" ]; then
+    echo "   Creating new virtual environment..."
+    python3 -m venv venv
+fi
+
+# Activate venv
+source venv/bin/activate
+
 echo "📦 Updating Python dependencies..."
 cd survey_tracking_system/backend
-pip3 install -r requirements.txt --upgrade
+pip install -r requirements.txt --upgrade
 
 cd ../frontend
-pip3 install -r requirements.txt --upgrade
+pip install -r requirements.txt --upgrade
+
+# Deactivate for now (services will use venv path)
+deactivate
+cd "$PROJECT_DIR"
 
 # 6. Update database configuration
 cd "$PROJECT_DIR/survey_tracking_system/backend"
@@ -86,8 +102,8 @@ After=network.target postgresql.service
 Type=simple
 User=$ACTUAL_USER
 WorkingDirectory=$PROJECT_DIR/survey_tracking_system/backend
-Environment="PATH=/usr/bin:/usr/local/bin"
-ExecStart=/usr/bin/python3 kobo_app.py
+Environment="PATH=$PROJECT_DIR/venv/bin:/usr/bin:/usr/local/bin"
+ExecStart=$PROJECT_DIR/venv/bin/python kobo_app.py
 Restart=always
 RestartSec=5
 
@@ -105,8 +121,8 @@ After=network.target gbv-backend.service
 Type=simple
 User=$ACTUAL_USER
 WorkingDirectory=$PROJECT_DIR/survey_tracking_system/frontend
-Environment="PATH=/usr/bin:/usr/local/bin"
-ExecStart=/usr/bin/python3 -m streamlit run kobo_dashboard.py --server.port 8501 --server.address 0.0.0.0
+Environment="PATH=$PROJECT_DIR/venv/bin:/usr/bin:/usr/local/bin"
+ExecStart=$PROJECT_DIR/venv/bin/streamlit run kobo_dashboard.py --server.port 8501 --server.address 0.0.0.0
 Restart=always
 RestartSec=5
 
