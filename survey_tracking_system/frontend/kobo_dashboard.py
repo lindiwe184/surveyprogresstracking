@@ -1049,6 +1049,229 @@ def show_reports_page():
     st.markdown("---")
     
     # ==========================================
+    # KEY INDICATORS MAPPING - 8 specific indicators
+    # ==========================================
+    KEY_INDICATORS = {
+        "ICT Support": {"key": "grp3/q3_1_4", "label": "Availability of ICT Support Services"},
+        "ICT Policy": {"key": "grp2/q2_1_1", "label": "Availability of ICT Policies"},
+        "Human Resource": {"key": "grp3/q3_1_1", "label": "Human Resource (ICT Staff)"},
+        "Equipment": {"key": "grp3/q3_2_4", "label": "Computing Equipment (Network Devices)"},
+        "Email": {"key": "grp3/q3_2_2", "label": "Email/Communication Services (WiFi)"},
+        "Data System": {"key": "grp4/q4_1_1", "label": "Data Collection System"},
+        "Database": {"key": "grp4/q4_4_1", "label": "Availability of Database/Backup"},
+        "Internet": {"key": "grp3/q3_2_3", "label": "Availability of Internet"},
+    }
+    
+    # Institution Group classification
+    INSTITUTION_GROUPS = {
+        "Police": {"color": "#3b82f6", "keywords": ["police", "nampol", "law enforcement", "criminal"]},
+        "Health Services": {"color": "#22c55e", "keywords": ["clinic", "hospital", "health", "medical", "nurse"]},
+        "Correctional Services": {"color": "#ef4444", "keywords": ["prison", "correctional", "detention", "custody"]},
+        "Gender/Social": {"color": "#a855f7", "keywords": ["gender", "women", "children", "social", "welfare"]},
+    }
+    
+    def classify_institution_group(inst_name):
+        """Classify institution into groups based on name keywords."""
+        inst_lower = inst_name.lower()
+        for group, info in INSTITUTION_GROUPS.items():
+            for keyword in info["keywords"]:
+                if keyword in inst_lower:
+                    return group
+        return "Other"
+    
+    def calculate_yes_percentage(insts_list, indicator_key):
+        """Calculate percentage of 'Yes' responses for an indicator."""
+        yes_count = 0
+        total = 0
+        for inst in insts_list:
+            value = str(inst["data"].get(indicator_key, "")).strip().lower()
+            if value:
+                total += 1
+                if value in ["yes", "y", "true", "1"]:
+                    yes_count += 1
+        return round(yes_count / total * 100, 1) if total > 0 else 0
+    
+    # Group data by region
+    regional_data = {}
+    for inst in institutions:
+        region = inst["region"]
+        if region == "Unknown":
+            continue
+        if region not in regional_data:
+            regional_data[region] = []
+        regional_data[region].append(inst)
+    
+    # Group data by institution type
+    institution_groups_data = {}
+    for inst in institutions:
+        group = classify_institution_group(inst["name"])
+        if group not in institution_groups_data:
+            institution_groups_data[group] = []
+        institution_groups_data[group].append(inst)
+    
+    # ==========================================
+    # SECTION 0: KEY INDICATOR CHARTS
+    # ==========================================
+    st.markdown("""
+    <div class="section-divider" style="background: linear-gradient(135deg, #0066cc 0%, #3b82f6 100%); border-left: 4px solid #1e40af;">
+        <h3 style="color: white;">📊 Key ICT Readiness Indicators</h3>
+        <p style="color: rgba(255,255,255,0.8);">8 critical indicators compared across regions and institution groups</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # ---- CHART 1: Key Indicators by REGION (Grouped Bar Chart) ----
+    st.markdown("### 🗺️ ICT Readiness Indicators by Region")
+    
+    # Build data for regional grouped bar chart
+    region_indicator_data = []
+    for region in sorted(regional_data.keys()):
+        insts = regional_data[region]
+        for ind_name, ind_info in KEY_INDICATORS.items():
+            pct = calculate_yes_percentage(insts, ind_info["key"])
+            region_indicator_data.append({
+                "Region": region,
+                "Indicator": ind_name,
+                "Yes_Pct": pct
+            })
+    
+    if region_indicator_data:
+        region_df = pd.DataFrame(region_indicator_data)
+        
+        # Define colors for each indicator
+        indicator_colors = {
+            "ICT Support": "#22c55e",
+            "ICT Policy": "#f97316", 
+            "Human Resource": "#ef4444",
+            "Equipment": "#8b5cf6",
+            "Email": "#06b6d4",
+            "Data System": "#a855f7",
+            "Database": "#eab308",
+            "Internet": "#3b82f6"
+        }
+        
+        fig_region = go.Figure()
+        
+        for indicator in KEY_INDICATORS.keys():
+            df_ind = region_df[region_df["Indicator"] == indicator]
+            fig_region.add_trace(go.Bar(
+                name=indicator,
+                x=df_ind["Region"],
+                y=df_ind["Yes_Pct"],
+                marker_color=indicator_colors.get(indicator, "#64748b"),
+                text=[f"{v:.0f}%" for v in df_ind["Yes_Pct"]],
+                textposition='outside',
+                textfont=dict(size=9)
+            ))
+        
+        # Add 70% threshold line
+        fig_region.add_hline(y=70, line_dash="dash", line_color="#3b82f6", 
+                           annotation_text="70% Target", annotation_position="right")
+        
+        fig_region.update_layout(
+            barmode='group',
+            title=dict(text="ICT Readiness Indicators by Region", font=dict(size=16, color='#1a1a1a')),
+            height=450,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a'),
+            xaxis=dict(title="Region", tickangle=45),
+            yaxis=dict(title="Percentage (%)", range=[0, 110]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hoverlabel=dict(bgcolor="white", font_size=12, font_color="#1a1a1a", bordercolor="#d1d5db"),
+            margin=dict(l=60, r=40, t=80, b=100)
+        )
+        
+        st.plotly_chart(fig_region, use_container_width=True, key="key_indicators_by_region")
+        
+        # Summary stats
+        with st.expander("📊 Regional Summary Statistics"):
+            summary_rows = []
+            for region in sorted(regional_data.keys()):
+                row = {"Region": region, "Institutions": len(regional_data[region])}
+                for ind_name, ind_info in KEY_INDICATORS.items():
+                    pct = calculate_yes_percentage(regional_data[region], ind_info["key"])
+                    row[ind_name] = f"{pct:.0f}%"
+                summary_rows.append(row)
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    
+    # ---- CHART 2: Key Indicators by INSTITUTION GROUP (Grouped Bar Chart) ----
+    st.markdown("### 🏛️ ICT Readiness Indicators by Institution Group")
+    st.markdown("*Institutions classified by type: Police, Health Services, Correctional Services, Gender/Social, Other*")
+    
+    # Build data for institution group bar chart
+    group_indicator_data = []
+    for group in ["Police", "Health Services", "Correctional Services", "Gender/Social", "Other"]:
+        if group in institution_groups_data:
+            insts = institution_groups_data[group]
+            for ind_name, ind_info in KEY_INDICATORS.items():
+                pct = calculate_yes_percentage(insts, ind_info["key"])
+                group_indicator_data.append({
+                    "Institution Group": group,
+                    "Indicator": ind_name,
+                    "Yes_Pct": pct,
+                    "Count": len(insts)
+                })
+    
+    if group_indicator_data:
+        group_df = pd.DataFrame(group_indicator_data)
+        
+        fig_group = go.Figure()
+        
+        for indicator in KEY_INDICATORS.keys():
+            df_ind = group_df[group_df["Indicator"] == indicator]
+            fig_group.add_trace(go.Bar(
+                name=indicator,
+                x=df_ind["Institution Group"],
+                y=df_ind["Yes_Pct"],
+                marker_color=indicator_colors.get(indicator, "#64748b"),
+                text=[f"{v:.0f}%" for v in df_ind["Yes_Pct"]],
+                textposition='outside',
+                textfont=dict(size=9)
+            ))
+        
+        # Add 70% threshold line
+        fig_group.add_hline(y=70, line_dash="dash", line_color="#3b82f6",
+                          annotation_text="70% Target", annotation_position="right")
+        
+        fig_group.update_layout(
+            barmode='group',
+            title=dict(text="ICT Readiness Indicators by Institution Group", font=dict(size=16, color='#1a1a1a')),
+            height=450,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a'),
+            xaxis=dict(title="Institution Group", tickangle=0),
+            yaxis=dict(title="Percentage (%)", range=[0, 110]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hoverlabel=dict(bgcolor="white", font_size=12, font_color="#1a1a1a", bordercolor="#d1d5db"),
+            margin=dict(l=60, r=40, t=80, b=60)
+        )
+        
+        st.plotly_chart(fig_group, use_container_width=True, key="key_indicators_by_group")
+        
+        # Institution group counts
+        group_counts = []
+        for group in ["Police", "Health Services", "Correctional Services", "Gender/Social", "Other"]:
+            if group in institution_groups_data:
+                group_counts.append({
+                    "Institution Group": group,
+                    "Count": len(institution_groups_data[group]),
+                    "Color": INSTITUTION_GROUPS.get(group, {}).get("color", "#64748b")
+                })
+        
+        if group_counts:
+            st.markdown("**Institution Distribution by Group:**")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            cols = [col1, col2, col3, col4, col5]
+            for i, gc in enumerate(group_counts[:5]):
+                with cols[i]:
+                    st.metric(gc["Institution Group"], gc["Count"])
+    
+    st.markdown("---")
+    
+    # ==========================================
     # SECTION 1: INSTITUTIONAL COMPARISON TABLE
     # ==========================================
     st.markdown("""
