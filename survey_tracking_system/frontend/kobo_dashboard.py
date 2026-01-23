@@ -1239,14 +1239,14 @@ def show_reports_page():
                 y=df_group["Count"],
                 marker_color=group_colors.get(group, "#64748b"),
                 text=df_group["Count"],
-                textposition='inside',
-                textfont=dict(size=10, color='white')
+                textposition='outside',
+                textfont=dict(size=9)
             ))
         
         fig_region_groups.update_layout(
-            barmode='stack',
+            barmode='group',
             title=dict(text="Institution Types per Region", font=dict(size=16, color='#1a1a1a')),
-            height=400,
+            height=450,
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             font=dict(color='#1a1a1a'),
