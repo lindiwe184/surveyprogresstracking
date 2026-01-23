@@ -359,6 +359,20 @@ def fetch_json(path: str, params=None) -> Dict[str, Any]:
         return {}
 
 
+def apply_light_theme_to_chart(fig):
+    """Apply light theme styling to any Plotly chart - white hover tooltips."""
+    fig.update_layout(
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=12,
+            font_family="Inter, sans-serif",
+            font_color="#1a1a1a",
+            bordercolor="#d1d5db"
+        )
+    )
+    return fig
+
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Loading survey data...")
 def get_all_data():
     """Fetch and cache all data in one call to avoid multiple API requests."""
@@ -1445,10 +1459,12 @@ paper_bgcolor='rgba(0,0,0,0)',
                 sel_region_pie.update_layout(
                     title=f"{selected_region} - Overall Responses",
                     height=280,
-paper_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='#1a1a1a'),
-                    margin=dict(l=20, r=20, t=40, b=20)
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#1a1a1a'),
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    hoverlabel=dict(bgcolor="white", font_size=12, font_color="#1a1a1a", bordercolor="#d1d5db")
                 )
+                apply_light_theme_to_chart(sel_region_pie)
                 st.plotly_chart(sel_region_pie, use_container_width=True, key=f"sel_region_pie_{selected_region}")
         
         st.markdown("---")
@@ -2157,7 +2173,7 @@ def show_submissions_summary():
                                 }]
                                 pdf_bytes = generate_chart_pdf(charts_data, "Consolidated GBV Report")
                                 if pdf_bytes:
-                                    st.download_button("Download Consolidated PDF", data=pdf_bytes, file_name="consolidated_report.pdf", mime="application/pdf")
+                                st.download_button("Download Consolidated PDF", data=pdf_bytes, file_name="consolidated_report.pdf", mime="application/pdf")
                                 else:
                                     st.info("PDF generation requires 'reportlab' package")
                         except Exception as e:
@@ -2550,6 +2566,34 @@ def main():
         background: #ffffff !important;
     }
     
+    /* FORCE ALL TEXT TO BE DARK - Override any theme that makes text white */
+    html, body, .main, .stMarkdown, .stText, p, span, div, label, 
+    [data-testid="stMarkdownContainer"], [data-testid="stText"] {
+        color: #1a1a1a !important;
+    }
+    
+    /* Sidebar text */
+    section[data-testid="stSidebar"], 
+    section[data-testid="stSidebar"] *, 
+    section[data-testid="stSidebar"] .stMarkdown {
+        color: #1a1a1a !important;
+    }
+    
+    /* Button text */
+    .stButton button {
+        color: #1a1a1a !important;
+    }
+    
+    /* Select box text */
+    .stSelectbox, .stSelectbox label, .stSelectbox div {
+        color: #1a1a1a !important;
+    }
+    
+    /* Ensure expander headers are visible */
+    .streamlit-expanderHeader {
+        color: #1a1a1a !important;
+    }
+    
     /* Main content area pure white */
     .main {
         background: #ffffff !important;
@@ -2885,11 +2929,34 @@ def main():
     
     /* DATA TABLES - Styling for pandas dataframes (Regional Progress table, etc.) */
     .stDataFrame {
-        background: white;
+        background: white !important;
         border-radius: 16px;
         overflow: hidden;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
         border: 1px solid #e5e7eb;
+    }
+    
+    /* Force table backgrounds and text to be light theme */
+    .stDataFrame, .stDataFrame table, .stDataFrame tbody, .stDataFrame tr, .stDataFrame td, .stDataFrame th {
+        background-color: white !important;
+        color: #1a1a1a !important;
+    }
+    
+    /* Table headers */
+    .stDataFrame thead th {
+        background-color: #f8f9fa !important;
+        color: #1a1a1a !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Table cell text */
+    .stDataFrame td {
+        color: #1a1a1a !important;
+    }
+    
+    /* Table borders */
+    .stDataFrame table {
+        border-color: #e5e7eb !important;
     }
     
     /* CHART CONTAINERS - White boxes around plotly charts */
@@ -2929,6 +2996,29 @@ def main():
     .js-plotly-plot .plotly .title text {
         fill: #1a1a1a !important;
         color: #1a1a1a !important;
+    }
+    
+    /* PLOTLY HOVER TOOLTIPS - Light background, dark text */
+    .js-plotly-plot .hovertext path {
+        fill: #ffffff !important;
+        stroke: #d1d5db !important;
+    }
+    
+    .js-plotly-plot .hovertext text {
+        fill: #1a1a1a !important;
+        color: #1a1a1a !important;
+    }
+    
+    .js-plotly-plot .hoverlayer .hovertext {
+        background: white !important;
+    }
+    
+    .js-plotly-plot .hoverlayer rect {
+        fill: white !important;
+    }
+    
+    .js-plotly-plot .hoverlayer text {
+        fill: #1a1a1a !important;
     }
     
     /* Chart container with no background */
@@ -3242,6 +3332,30 @@ def main():
     /* Side-by-side charts get equal height appearance */
     [data-testid="stHorizontalBlock"] [data-testid="stPlotlyChart"] {
         min-height: auto !important;
+    }
+    
+    /* ==========================================================
+       ABSOLUTE FINAL: FORCE LIGHT THEME ON EVERYTHING
+       ========================================================== */
+    
+    /* Override any dark theme that browser might apply */
+    * {
+        color-scheme: light !important;
+    }
+    
+    /* Ensure all text elements are dark */
+    .stMarkdown, .stText, .stCaption, .stCode, p, span, div, label {
+        color: #1a1a1a !important;
+    }
+    
+    /* Metric labels and values */
+    [data-testid="stMetricLabel"], [data-testid="stMetricValue"] {
+        color: #1a1a1a !important;
+    }
+    
+    /* Info boxes */
+    .stAlert, .stInfo, .stWarning, .stSuccess, .stError {
+        color: #1a1a1a !important;
     }
     </style>
     """, unsafe_allow_html=True)
