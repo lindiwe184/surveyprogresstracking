@@ -1064,10 +1064,10 @@ def show_reports_page():
     
     # Institution Group classification
     INSTITUTION_GROUPS = {
-        "Police": {"color": "#3b82f6", "keywords": ["police", "nampol", "law enforcement", "criminal"]},
-        "Health Services": {"color": "#22c55e", "keywords": ["clinic", "hospital", "health", "medical", "nurse"]},
-        "Correctional Services": {"color": "#ef4444", "keywords": ["prison", "correctional", "detention", "custody"]},
-        "Gender/Social": {"color": "#a855f7", "keywords": ["gender", "women", "children", "social", "welfare"]},
+        "Police": {"color": "#3b82f6", "keywords": ["police", "nampol", "police station"]},
+        "Ministry of Health Services": {"color": "#22c55e", "keywords": ["clinic", "hospital", "health", "medical"]},
+        "Correctional Services": {"color": "#ef4444", "keywords": ["prison", "correctional", "custody"]},
+        "Ministry of Gender": {"color": "#a855f7", "keywords": ["women", "children", "shelter", "gender"]},
     }
     
     def classify_institution_group(inst_name):
@@ -1198,11 +1198,11 @@ def show_reports_page():
     
     # ---- CHART 2: Key Indicators by INSTITUTION GROUP (Grouped Bar Chart) ----
     st.markdown("### 🏛️ ICT Readiness Indicators by Institution Group")
-    st.markdown("*Institutions classified by type: Police, Health Services, Correctional Services, Gender/Social, Other*")
+    st.markdown("*Classification: Police Stations → Police | Clinics & Hospitals → Ministry of Health Services | Prisons → Correctional Services | Women & Children Shelters → Ministry of Gender*")
     
     # Build data for institution group bar chart
     group_indicator_data = []
-    for group in ["Police", "Health Services", "Correctional Services", "Gender/Social", "Other"]:
+    for group in ["Police", "Ministry of Health Services", "Correctional Services", "Ministry of Gender", "Other"]:
         if group in institution_groups_data:
             insts = institution_groups_data[group]
             for ind_name, ind_info in KEY_INDICATORS.items():
@@ -1253,7 +1253,7 @@ def show_reports_page():
         
         # Institution group counts
         group_counts = []
-        for group in ["Police", "Health Services", "Correctional Services", "Gender/Social", "Other"]:
+        for group in ["Police", "Ministry of Health Services", "Correctional Services", "Ministry of Gender", "Other"]:
             if group in institution_groups_data:
                 group_counts.append({
                     "Institution Group": group,
