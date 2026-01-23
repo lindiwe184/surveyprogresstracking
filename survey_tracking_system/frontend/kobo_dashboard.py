@@ -2173,7 +2173,7 @@ def show_submissions_summary():
                                 }]
                                 pdf_bytes = generate_chart_pdf(charts_data, "Consolidated GBV Report")
                                 if pdf_bytes:
-                                st.download_button("Download Consolidated PDF", data=pdf_bytes, file_name="consolidated_report.pdf", mime="application/pdf")
+                                    st.download_button("Download Consolidated PDF", data=pdf_bytes, file_name="consolidated_report.pdf", mime="application/pdf")
                                 else:
                                     st.info("PDF generation requires 'reportlab' package")
                         except Exception as e:
