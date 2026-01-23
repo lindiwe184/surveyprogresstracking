@@ -1196,6 +1196,78 @@ def show_reports_page():
     
     st.markdown("---")
     
+    # ---- CHART 1B: Institution Groups Distribution per Region ----
+    st.markdown("### 🏢 Institution Groups per Region")
+    st.markdown("*Distribution of institution types within each region*")
+    
+    # Build data for institution groups per region
+    region_group_data = []
+    group_order = ["Police", "Ministry of Health Services", "Correctional Services", "Ministry of Gender", "Other"]
+    group_colors = {
+        "Police": "#3b82f6",
+        "Ministry of Health Services": "#22c55e", 
+        "Correctional Services": "#ef4444",
+        "Ministry of Gender": "#a855f7",
+        "Other": "#64748b"
+    }
+    
+    for region in sorted(regional_data.keys()):
+        insts = regional_data[region]
+        # Count institutions by group in this region
+        group_counts_region = {g: 0 for g in group_order}
+        for inst in insts:
+            group = classify_institution_group(inst["name"])
+            group_counts_region[group] = group_counts_region.get(group, 0) + 1
+        
+        for group in group_order:
+            region_group_data.append({
+                "Region": region,
+                "Institution Group": group,
+                "Count": group_counts_region[group]
+            })
+    
+    if region_group_data:
+        region_group_df = pd.DataFrame(region_group_data)
+        
+        fig_region_groups = go.Figure()
+        
+        for group in group_order:
+            df_group = region_group_df[region_group_df["Institution Group"] == group]
+            fig_region_groups.add_trace(go.Bar(
+                name=group,
+                x=df_group["Region"],
+                y=df_group["Count"],
+                marker_color=group_colors.get(group, "#64748b"),
+                text=df_group["Count"],
+                textposition='inside',
+                textfont=dict(size=10, color='white')
+            ))
+        
+        fig_region_groups.update_layout(
+            barmode='stack',
+            title=dict(text="Institution Types per Region", font=dict(size=16, color='#1a1a1a')),
+            height=400,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#1a1a1a'),
+            xaxis=dict(title="Region", tickangle=45),
+            yaxis=dict(title="Number of Institutions"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hoverlabel=dict(bgcolor="white", font_size=12, font_color="#1a1a1a", bordercolor="#d1d5db"),
+            margin=dict(l=60, r=40, t=80, b=100)
+        )
+        
+        st.plotly_chart(fig_region_groups, use_container_width=True, key="institution_groups_per_region")
+        
+        # Summary table
+        with st.expander("📋 Institution Group Distribution Table"):
+            pivot_df = region_group_df.pivot(index='Region', columns='Institution Group', values='Count').fillna(0).astype(int)
+            pivot_df['Total'] = pivot_df.sum(axis=1)
+            pivot_df = pivot_df.reset_index()
+            st.dataframe(pivot_df, use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    
     # ---- CHART 2: Key Indicators by INSTITUTION GROUP (Grouped Bar Chart) ----
     st.markdown("### 🏛️ ICT Readiness Indicators by Institution Group")
     st.markdown("*Classification: Police Stations → Police | Clinics & Hospitals → Ministry of Health Services | Prisons → Correctional Services | Women & Children Shelters → Ministry of Gender*")
