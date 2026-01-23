@@ -1196,12 +1196,11 @@ def show_reports_page():
     
     st.markdown("---")
     
-    # ---- CHART 1B: Institution Groups Distribution per Region ----
-    st.markdown("### 🏢 Institution Groups per Region")
-    st.markdown("*Distribution of institution types within each region*")
+    # ---- CHART 1B: Institution Groups per Region BY INDICATOR (with filter) ----
+    st.markdown("### 🏢 Institution Groups per Region by Indicator")
+    st.markdown("*Select an indicator to see how many institutions in each group (per region) meet that requirement*")
     
-    # Build data for institution groups per region
-    region_group_data = []
+    # Define group order and colors
     group_order = ["Police", "Ministry of Health Services", "Correctional Services", "Ministry of Gender", "Other"]
     group_colors = {
         "Police": "#3b82f6",
@@ -1211,60 +1210,94 @@ def show_reports_page():
         "Other": "#64748b"
     }
     
-    for region in sorted(regional_data.keys()):
-        insts = regional_data[region]
-        # Count institutions by group in this region
-        group_counts_region = {g: 0 for g in group_order}
-        for inst in insts:
-            group = classify_institution_group(inst["name"])
-            group_counts_region[group] = group_counts_region.get(group, 0) + 1
-        
-        for group in group_order:
-            region_group_data.append({
-                "Region": region,
-                "Institution Group": group,
-                "Count": group_counts_region[group]
-            })
+    # Indicator filter dropdown
+    indicator_options = {name: info["label"] for name, info in KEY_INDICATORS.items()}
+    selected_indicator = st.selectbox(
+        "📊 Select Indicator to View",
+        options=list(indicator_options.keys()),
+        format_func=lambda x: f"{x} - {indicator_options[x]}",
+        key="indicator_filter_chart"
+    )
     
-    if region_group_data:
-        region_group_df = pd.DataFrame(region_group_data)
+    if selected_indicator:
+        selected_key = KEY_INDICATORS[selected_indicator]["key"]
+        selected_label = KEY_INDICATORS[selected_indicator]["label"]
         
-        fig_region_groups = go.Figure()
+        # Build data: count "Yes" responses per institution group per region
+        indicator_region_group_data = []
         
-        for group in group_order:
-            df_group = region_group_df[region_group_df["Institution Group"] == group]
-            fig_region_groups.add_trace(go.Bar(
-                name=group,
-                x=df_group["Region"],
-                y=df_group["Count"],
-                marker_color=group_colors.get(group, "#64748b"),
-                text=df_group["Count"],
-                textposition='outside',
-                textfont=dict(size=9)
-            ))
+        for region in sorted(regional_data.keys()):
+            insts = regional_data[region]
+            
+            # Group institutions by type within this region
+            group_yes_counts = {g: 0 for g in group_order}
+            group_total_counts = {g: 0 for g in group_order}
+            
+            for inst in insts:
+                group = classify_institution_group(inst["name"])
+                group_total_counts[group] = group_total_counts.get(group, 0) + 1
+                
+                # Check if this institution answered "Yes" to the selected indicator
+                value = str(inst["data"].get(selected_key, "")).strip().lower()
+                if value in ["yes", "y", "true", "1"]:
+                    group_yes_counts[group] = group_yes_counts.get(group, 0) + 1
+            
+            for group in group_order:
+                indicator_region_group_data.append({
+                    "Region": region,
+                    "Institution Group": group,
+                    "Yes Count": group_yes_counts[group],
+                    "Total": group_total_counts[group]
+                })
         
-        fig_region_groups.update_layout(
-            barmode='group',
-            title=dict(text="Institution Types per Region", font=dict(size=16, color='#1a1a1a')),
-            height=450,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='#1a1a1a'),
-            xaxis=dict(title="Region", tickangle=45),
-            yaxis=dict(title="Number of Institutions"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            hoverlabel=dict(bgcolor="white", font_size=12, font_color="#1a1a1a", bordercolor="#d1d5db"),
-            margin=dict(l=60, r=40, t=80, b=100)
-        )
-        
-        st.plotly_chart(fig_region_groups, use_container_width=True, key="institution_groups_per_region")
-        
-        # Summary table
-        with st.expander("📋 Institution Group Distribution Table"):
-            pivot_df = region_group_df.pivot(index='Region', columns='Institution Group', values='Count').fillna(0).astype(int)
-            pivot_df['Total'] = pivot_df.sum(axis=1)
-            pivot_df = pivot_df.reset_index()
-            st.dataframe(pivot_df, use_container_width=True, hide_index=True)
+        if indicator_region_group_data:
+            indicator_df = pd.DataFrame(indicator_region_group_data)
+            
+            fig_indicator_groups = go.Figure()
+            
+            for group in group_order:
+                df_group = indicator_df[indicator_df["Institution Group"] == group]
+                fig_indicator_groups.add_trace(go.Bar(
+                    name=group,
+                    x=df_group["Region"],
+                    y=df_group["Yes Count"],
+                    marker_color=group_colors.get(group, "#64748b"),
+                    text=df_group["Yes Count"],
+                    textposition='outside',
+                    textfont=dict(size=9),
+                    hovertemplate="<b>%{x}</b><br>" + group + "<br>Yes: %{y}<extra></extra>"
+                ))
+            
+            fig_indicator_groups.update_layout(
+                barmode='group',
+                title=dict(
+                    text=f"'{selected_indicator}' - Institutions with 'Yes' by Region & Group",
+                    font=dict(size=15, color='#1a1a1a')
+                ),
+                height=450,
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='#1a1a1a'),
+                xaxis=dict(title="Region", tickangle=45),
+                yaxis=dict(title="Number of Institutions (Yes)"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hoverlabel=dict(bgcolor="white", font_size=12, font_color="#1a1a1a", bordercolor="#d1d5db"),
+                margin=dict(l=60, r=40, t=100, b=100)
+            )
+            
+            st.plotly_chart(fig_indicator_groups, use_container_width=True, key=f"indicator_groups_{selected_indicator}")
+            
+            # Summary info
+            total_yes = indicator_df["Yes Count"].sum()
+            total_insts = indicator_df["Total"].sum() // len(group_order)  # Avoid double counting
+            st.info(f"**{selected_label}**: {total_yes} institutions answered 'Yes' out of {len(institutions)} total")
+            
+            # Detailed table
+            with st.expander(f"📋 Detailed Data: {selected_indicator}"):
+                pivot_yes = indicator_df.pivot(index='Region', columns='Institution Group', values='Yes Count').fillna(0).astype(int)
+                pivot_yes['Total Yes'] = pivot_yes.sum(axis=1)
+                pivot_yes = pivot_yes.reset_index()
+                st.dataframe(pivot_yes, use_container_width=True, hide_index=True)
     
     st.markdown("---")
     
