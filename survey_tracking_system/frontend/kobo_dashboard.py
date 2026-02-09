@@ -972,7 +972,6 @@ def calculate_category_score(submissions: List[Dict], category: str) -> float:
 
 def show_reports_page():
     """Display GBV ICT Readiness Indicators Report - Institutional and Regional Data."""
-    st.markdown('<h2 class="section-header">📋 GBV ICT Readiness Indicators Report</h2>', unsafe_allow_html=True)
     
     # Use cached data
     all_data = get_all_data()
@@ -1026,8 +1025,6 @@ def show_reports_page():
         else:
             return str(val).title()
     
-    st.info(f"**📊 Total Assessments: {len(submissions)} institutions**")
-    
     # Build institution list for use in other sections
     institutions = []
     for sub in submissions:
@@ -1041,12 +1038,6 @@ def show_reports_page():
     
     # Sort by region then institution
     institutions.sort(key=lambda x: (x["region"], x["name"]))
-    
-    # Region filter for all sections
-    regions = sorted(list(set(inst["region"] for inst in institutions if inst["region"] != "Unknown")))
-    region_filter = st.selectbox("🗺️ Filter by Region", ["All Regions"] + regions, key="region_filter")
-    
-    st.markdown("---")
     
     # ==========================================
     # KEY INDICATORS MAPPING - 8 specific indicators
