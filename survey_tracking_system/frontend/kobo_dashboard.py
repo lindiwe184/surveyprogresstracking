@@ -608,7 +608,7 @@ def show_national_overview():
         }
     ))
     fig.update_layout(height=320, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#1a1a1a'))
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig)
     
     # Professional refresh section
     st.markdown("""
@@ -618,7 +618,7 @@ def show_national_overview():
     
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        if st.button("🔄 Refresh Data", type="primary", width='stretch'):
+        if st.button("🔄 Refresh Data", type="primary"):
             st.success("Data refreshed successfully!")
             st.rerun()
 
@@ -723,7 +723,7 @@ def show_regional_breakdown():
         display_df = display_df.copy()
         display_df["Region"] = display_df["Region"].str.lower().map(region_mapping).fillna(display_df["Region"].str.title())
         display_df["Completion_Rate"] = display_df["Completion_Rate"].astype(str) + "%"
-        st.dataframe(display_df, width='stretch')
+        st.dataframe(display_df)
         
         # Regional champion showcase - positioned below the table in the left column
         if not region_df.empty:
@@ -778,7 +778,7 @@ def show_regional_breakdown():
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig)
 
         # === REGION REPORT BUTTONS ===
         regions_list = sorted(region_df['Region'].astype(str).tolist()) if not region_df.empty else []
@@ -1029,7 +1029,7 @@ def show_reports_page():
             help="Choose output format for the report"
         )
     
-    if st.button("📄 Generate Comprehensive Analytical Report", type="primary", width='stretch'):
+    if st.button("📄 Generate Comprehensive Analytical Report", type="primary"):
         try:
             import tempfile
             
@@ -1384,7 +1384,7 @@ def show_reports_page():
                 margin=dict(l=60, r=40, t=100, b=100)
             )
             
-            st.plotly_chart(fig_indicator_groups, width='stretch', key=f"indicator_groups_{selected_indicator}")
+            st.plotly_chart(fig_indicator_groups, key=f"indicator_groups_{selected_indicator}")
             
             # Summary info
             total_yes = indicator_df["Yes Count"].sum()
@@ -1396,7 +1396,7 @@ def show_reports_page():
                 pivot_yes = indicator_df.pivot(index='Region', columns='Institution Group', values='Yes Count').fillna(0).astype(int)
                 pivot_yes['Total Yes'] = pivot_yes.sum(axis=1)
                 pivot_yes = pivot_yes.reset_index()
-                st.dataframe(pivot_yes, width='stretch', hide_index=True)
+                st.dataframe(pivot_yes, hide_index=True)
     
     st.markdown("---")
     
@@ -1433,7 +1433,7 @@ def show_reports_page():
             })
         
         region_df = pd.DataFrame(region_counts)
-        st.dataframe(region_df, width='stretch', hide_index=True)
+        st.dataframe(region_df, hide_index=True)
     
     with col2:
         # Bar chart of institutions per region
@@ -1453,7 +1453,7 @@ paper_bgcolor='rgba(0,0,0,0)',
             font=dict(color='#1a1a1a'),
                 showlegend=False
             )
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig)
     
     # Regional comparison across all categories
     st.markdown("### 📊 Regional Response Summary - All Categories")
@@ -1547,7 +1547,7 @@ paper_bgcolor='rgba(0,0,0,0)',
                     paper_bgcolor='rgba(0,0,0,0)',
                     font=dict(color='#1a1a1a')
                 )
-                st.plotly_chart(reg_pie_fig, width='stretch', key="regional_pie_chart")
+                st.plotly_chart(reg_pie_fig, key="regional_pie_chart")
         
     # Regional indicator breakdown
     st.markdown("### Regional Indicator Summary")
@@ -1603,7 +1603,7 @@ paper_bgcolor='rgba(0,0,0,0)',
                     hoverlabel=dict(bgcolor="white", font_size=12, font_color="#1a1a1a", bordercolor="#d1d5db")
                 )
                 apply_light_theme_to_chart(sel_region_pie)
-                st.plotly_chart(sel_region_pie, width='stretch', key=f"sel_region_pie_{selected_region}")
+                st.plotly_chart(sel_region_pie, key=f"sel_region_pie_{selected_region}")
         
         st.markdown("---")
         
@@ -1643,7 +1643,7 @@ paper_bgcolor='rgba(0,0,0,0)',
                     })
                 
                 summary_df = pd.DataFrame(indicator_summary)
-                st.dataframe(summary_df, width='stretch', hide_index=True)
+                st.dataframe(summary_df, hide_index=True)
                 
                 # Visual chart for this category
                 if not summary_df.empty and len(summary_df) > 0:
@@ -1680,7 +1680,7 @@ paper_bgcolor='rgba(0,0,0,0)',
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                     )
                     cat_region_fig.update_xaxes(tickangle=45)
-                    st.plotly_chart(cat_region_fig, width='stretch', key=f"cat_region_{category}_{selected_region}")
+                    st.plotly_chart(cat_region_fig, key=f"cat_region_{category}_{selected_region}")
     
     # ==========================================
     # SECTION 3: COMPLETE INDICATOR LIST
@@ -1702,7 +1702,7 @@ paper_bgcolor='rgba(0,0,0,0)',
             {"#": i+1, "Category": ind["category"], "Indicator": ind["label"], "Form Field": ind["key"]}
             for i, ind in enumerate(all_indicators)
         ])
-        st.dataframe(indicator_list_df, width='stretch', hide_index=True)
+        st.dataframe(indicator_list_df, hide_index=True)
     
     with ref_col2:
         st.markdown("### Summary")
@@ -2129,7 +2129,7 @@ def show_daily_progress():
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig)
     
     # Daily submissions and cumulative progress charts side by side
     col1, col2 = st.columns([1, 1])
@@ -2165,7 +2165,7 @@ def show_daily_progress():
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig)
     
     with col2:
         st.subheader("Cumulative Progress")
@@ -2185,7 +2185,7 @@ def show_daily_progress():
         )
         fig.update_xaxes(showgrid=True, gridcolor='lightgray')
         fig.update_yaxes(showgrid=True, gridcolor='lightgray')
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig)
 
 
 def show_submissions_summary():
@@ -2225,7 +2225,7 @@ def show_submissions_summary():
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            st.dataframe(region_df, width='stretch')
+            st.dataframe(region_df)
         
         with col2:
             # Display as metrics instead of chart to avoid compatibility issues
@@ -2249,7 +2249,7 @@ def show_submissions_summary():
         date_df.loc[:, "Date"] = date_df["Date"].dt.strftime('%Y-%m-%d')
         
         # Display as table instead of chart to avoid compatibility issues
-        st.dataframe(date_df, width='stretch')
+        st.dataframe(date_df)
 
     # --- EXPORT INDICATORS TO EXCEL ---
     with st.expander("Export Indicators to Excel"):
@@ -2663,7 +2663,7 @@ def show_raw_submissions():
     })
 
     st.write(f"**Showing {len(display_df)} recent sanitized submissions (no PII)**")
-    st.dataframe(display_df, width='stretch')
+    st.dataframe(display_df)
 
 
 
@@ -3520,7 +3520,7 @@ def main():
     with st.sidebar:
         st.markdown("---")
         st.markdown("### ⚡ Data Controls")
-        if st.button("🔄 Refresh Data", width='stretch', help="Clear cache and reload all data"):
+        if st.button("🔄 Refresh Data", help="Clear cache and reload all data"):
             st.cache_data.clear()
             st.rerun()
         st.caption(f"Data cached for {CACHE_TTL} seconds")
